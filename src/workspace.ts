@@ -61,12 +61,12 @@ export class Workspaces {
     });
     let policyText: string | undefined;
     for (const path of ['.hey.yaml', '.codereviewbot.yaml']) {
-      try { policyText = (await git(cache, ['show', `${snapshot.startSha}:${path}`])).toString('utf8'); break; } catch { /* optional base policy */ }
+      try { policyText = (await git(cache, ['show', `${snapshot.policySha ?? snapshot.startSha}:${path}`])).toString('utf8'); break; } catch { /* optional base policy */ }
     }
     const policy = readPolicy(policyText === undefined ? undefined : redact(policyText));
     const guidelines: string[] = [];
     for (const path of ['AGENTS.md', 'docs/coding-standards.md']) {
-      try { const text = (await git(cache, ['show', `${snapshot.startSha}:${path}`])).toString('utf8'); if (text.length <= 12000) guidelines.push(`${path}\n${redact(text)}`); } catch { /* optional */ }
+      try { const text = (await git(cache, ['show', `${snapshot.policySha ?? snapshot.startSha}:${path}`])).toString('utf8'); if (text.length <= 12000) guidelines.push(`${path}\n${redact(text)}`); } catch { /* optional */ }
     }
     snapshot.policyVersion = policyVersion(policy, guidelines);
     let mode: 'full' | 'incremental' = 'full', previousSha: string | null = null;

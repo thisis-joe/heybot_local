@@ -19,7 +19,7 @@ import { ModelFailure, failureInfo, failureMessage, retryableFailure } from './m
 interface Notifications { questionsPublished(platform: Platform, report: Report): Promise<void> }
 
 export interface FailureContext { snap?: Snapshot; previous?: Report | null; requireAnswers?: boolean }
-export interface PreparedReview { snap: Snapshot; previous: Report | null; prepared: Awaited<ReturnType<Workspaces['prepare']>>; prepareMs: number; requireAnswers: boolean; cached: Report | null }
+export interface PreparedReview { snap: Snapshot; previous: Report | null; prepared: Awaited<ReturnType<Workspaces['prepare']>>; requireAnswers: boolean; cached: Report | null }
 
 
 export class Controller {
@@ -72,19 +72,19 @@ export class Controller {
   async prepareReview(job: Job, context: FailureContext = {}): Promise<PreparedReview> {
     const platform = this.platform(job.body.target);
     const snap = await platform.snapshot(job.body.target.number, true);
+    if (job.body.merged && snap.merged === false) throw new Superseded('PR/MR is not merged');
     if (job.body.headSha && job.body.headSha !== snap.headSha) throw new Superseded('Revision changed after admission');
     context.snap = snap;
     snap.title = redact(snap.title); snap.description = redact(snap.description);
     const previous = (await this.store.getTarget(snap))?.report ?? null;
     context.previous = previous;
-    const started = Date.now();
     const priorSnapshot = !job.body.merged && isQuestionReport(previous) && previous.state === 'completed' && !sameRevision(previous.snapshot, snap) ? previous.snapshot : null;
     const prepared = await this.workspaces.prepare(platform, snap, job.id, priorSnapshot);
-    context.requireAnswers = !job.body.merged && prepared.policy.requireAnswers === true;
+    context.requireAnswers = !job.body.merged && !snap.merged && prepared.policy.requireAnswers === true;
     const cached = !job.body.regenerate && isQuestionReport(previous) && reviewed(previous) && sameRevision(previous.snapshot, snap) && previous.snapshot.policyVersion === snap.policyVersion
       ? previous : null;
     if (!cached) await this.announce(platform, snap, prepared.mode, previous);
-    return { snap, previous, prepared, prepareMs: Date.now() - started, requireAnswers: context.requireAnswers, cached };
+    return { snap, previous, prepared, requireAnswers: context.requireAnswers, cached };
   }
   async validateReview(job: Job, snap: Snapshot): Promise<void> {
     await this.store.assertLease(job.id, job.owner);
@@ -92,7 +92,7 @@ export class Controller {
   }
   async command(job: Job, platform: Platform, lease: () => Promise<void>): Promise<void> {
     const comment = job.body.comment; if (!comment) return;
-    const permission = await platform.permission(comment.author); if (permission === 'none') return;
+    const permission = await platform.permission(comment.author, comment.authorId); if (permission === 'none') return;
     const normalized = normalizeMention(platform, comment.body);
     let command = parseCommand(normalized);
     const all = [...await platform.comments(job.body.target.number), ...await platform.inlineComments(job.body.target.number)];

@@ -10,7 +10,7 @@ const repository = z.string().regex(/^[\w.-]+(?:\/[\w.-]+)+$/)
 export const ModelConfigSchema = z.discriminatedUnion('provider', [
   z.strictObject({ provider: z.literal('codex'), model: z.string().min(1).optional() }),
   z.strictObject({ provider: z.literal('claude'), model: z.string().min(1), keyEnv: envName.default('ANTHROPIC_API_KEY') }),
-  z.strictObject({ provider: z.literal('ollama'), model: z.string().min(1), url: z.string().default('http://127.0.0.1:11434') }),
+  z.strictObject({ provider: z.literal('ollama'), model: z.string().min(1), context: z.number().int().min(2048).max(131072).default(16384), url: z.string().default('http://127.0.0.1:11434') }),
 ]);
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
 
@@ -25,6 +25,12 @@ export function trustedUrl(value: string, localOnly = false): string {
   }
   return url.href.replace(/\/$/, '');
 }
+export const NotificationProvider = z.enum(['mattermost', 'slack', 'discord', 'webhook']);
+export type NotificationProvider = z.infer<typeof NotificationProvider>;
+export const notificationEnv: Record<NotificationProvider, string> = {
+  mattermost: 'MATTERMOST_WEBHOOK_URL', slack: 'SLACK_WEBHOOK_URL',
+  discord: 'DISCORD_WEBHOOK_URL', webhook: 'HEYBOT_WEBHOOK_URL',
+};
 export const RepositorySchema = z.strictObject({
   platform: z.enum(['github', 'gitlab']),
   instance: z.string().transform(value => trustedUrl(value)),
@@ -32,13 +38,18 @@ export const RepositorySchema = z.strictObject({
   botLogin: z.string().regex(/^[\w.\u0080-\uFFFF-]+$/).max(100),
   mode: z.enum(['publish', 'observe']),
   tokenEnv: envName,
-  mattermostWebhookEnv: envName.optional(),
-  mattermostChannel: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/).optional(),
+  notifications: z.strictObject({
+    provider: NotificationProvider,
+    urlEnv: envName,
+    channel: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/).optional(),
+  }).optional(),
 }).superRefine((repo, ctx) => {
   if (repo.platform === 'github' && repo.repository.split('/').length !== 2)
     ctx.addIssue({ code: 'custom', message: 'GitHub 저장소 경로는 owner/repo 형식이어야 합니다.' });
-  if (repo.platform !== 'gitlab' && repo.mattermostWebhookEnv)
-    ctx.addIssue({ code: 'custom', message: 'Mattermost 알림은 GitLab에서 지원합니다.' });
+  if (repo.platform !== 'gitlab' && repo.notifications)
+    ctx.addIssue({ code: 'custom', message: '협업 도구 알림은 GitLab에서 지원합니다.' });
+  if (repo.notifications?.channel && repo.notifications.provider !== 'mattermost')
+    ctx.addIssue({ code: 'custom', message: '--notify-channel은 Mattermost에서 사용할 수 있습니다.' });
 });
 export type RepositoryConfig = z.infer<typeof RepositorySchema>;
 

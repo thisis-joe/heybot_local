@@ -26,4 +26,3 @@ test('interview keys may teach in up to five sentences while option notes and ot
   assert.equal(CsInterviewBatchSchema.safeParse(batch({ options: q.key.options.map((o, i) => i ? o : { ...o, explanation: sentences(4) }) })).success, false);
   assert.equal(AnswerKeySchema.safeParse({ ...q.key, explanation: sentences(4) }).success, false);
 });
-

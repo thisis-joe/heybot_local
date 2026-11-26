@@ -32,6 +32,26 @@ function outputSchema(phase: ModelPhase) {
   return schema;
 }
 
+// The Claude grammar supports a subset of JSON Schema. Zod still validates the full response.
+function claudeSchema(node: Record<string, any>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  const constraints: string[] = [];
+  for (const [key, value] of Object.entries(node)) {
+    if (['minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'minLength', 'maxLength',
+      'maxItems', 'pattern', 'uniqueItems'].includes(key) || (key === 'minItems' && value > 1)) {
+      constraints.push(`${key}=${value}`);
+    } else if (['properties', '$defs', 'definitions'].includes(key)) {
+      result[key] = Object.fromEntries(Object.entries(value).map(([name, schema]) => [name, claudeSchema(schema as Record<string, unknown>)]));
+    } else if (['anyOf', 'allOf', 'oneOf', 'prefixItems'].includes(key)) {
+      result[key] = value.map(claudeSchema);
+    } else if (key === 'items' && typeof value === 'object') {
+      result[key] = claudeSchema(value);
+    } else result[key] = value;
+  }
+  if (constraints.length) result.description = [node.description, ...constraints].filter(Boolean).join('; ');
+  return result;
+}
+
 async function codex(config: Extract<ModelConfig, { provider: 'codex' }>, phase: ModelPhase, prompt: string, timeoutMs: number): Promise<unknown> {
   await checkCodexLogin();
   const dir = await mkdtemp(join(tmpdir(), 'heybot-model-'));
@@ -73,18 +93,20 @@ async function httpModel(
     headers['anthropic-version'] = '2023-06-01';
   } else {
     // Ollama accepts hosted model names as well. Limit this provider to installed local model blobs.
+    if (/(?:[-:]cloud)(?:$|:)/i.test(config.model))
+      throw new ModelFailure({ code: 'model_unavailable', provider: 'ollama' });
     const tags = await fetch(`${trustedUrl(config.url, true)}/api/tags`, { redirect: 'error', signal: AbortSignal.timeout(10000) });
     if (!tags.ok) throw new ModelFailure({ code: 'unavailable', provider: 'ollama' });
     const models = JSON.parse(await boundedText(tags, 512000)).models;
     const name = config.model.split('/').at(-1)?.includes(':') ? config.model : `${config.model}:latest`;
     if (!Array.isArray(models) || !models.some(entry => (entry.name === name || entry.model === name) && /^[a-f0-9]{64}$/i.test(entry.digest ?? '') && entry.size > 0 && !entry.remote_host))
-      throw new ModelFailure({ code: 'unavailable', provider: 'ollama' });
+      throw new ModelFailure({ code: 'model_unavailable', provider: 'ollama' });
   }
   const response = await fetch(isClaude ? claudeEndpoint : `${trustedUrl(config.url, true)}/api/chat`, {
     method: 'POST', redirect: 'error', signal: AbortSignal.timeout(timeoutMs), headers,
     body: JSON.stringify(isClaude
-      ? { model: config.model, messages, max_tokens: 8192, output_config: { format: { type: 'json_schema', schema } } }
-      : { model: config.model, messages, stream: false, format: schema, options: { temperature: 0 } }),
+      ? { model: config.model, messages, max_tokens: 8192, output_config: { format: { type: 'json_schema', schema: claudeSchema(schema) } } }
+      : { model: config.model, messages, stream: false, format: schema, options: { temperature: 0, num_ctx: config.context } }),
   });
   if (!response.ok) {
     await response.body?.cancel();

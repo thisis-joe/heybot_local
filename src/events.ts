@@ -4,6 +4,7 @@ export interface Comment {
   id: string;
   body: string;
   author: string;
+  authorId?: number;
   parentId: string | null;
   discussionId: string | null;
   surface: 'issue' | 'review' | 'note';
@@ -24,5 +25,5 @@ export interface Event {
 
 /** Every bot write has a marker on its own line. Author names alone cannot distinguish a user's own commands. */
 export function hasOutputMarker(body: string): boolean {
-  return /^<!-- codereviewbot:[\w:-]+ -->$/m.test(body);
+  return /^<!-- codereviewbot:[\w:-]+ -->(?:\r?\n|$)/.test(body);
 }

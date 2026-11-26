@@ -1,0 +1,219 @@
+import { credential, loopback, repositoryKey, trustedUrl, type NotificationProvider } from './config.js';
+import { createHash } from 'node:crypto';
+import type { Target, Report } from './contracts.js';
+import { hasChangeQuestions } from './contracts.js';
+import type { Platform } from './platform.js';
+import { type Store, targetKey } from './store.js';
+import { plain, summaryMarker } from './render.js';
+import { HttpError } from './http-client.js';
+import { redact } from './redact.js';
+
+type PushCommit = { id: string; subject: string; timestamp: number | null; parentCount?: number };
+export type Notification = { kind: 'opened' | 'reopened' | 'merged' | 'closed'; title: string }
+  | { kind: 'questions'; title: string; count: number; noteId: string; partial?: boolean }
+  | { kind: 'commented'; title: string; noteId: string; author?: string; preview?: string }
+  | { kind: 'push'; branch: string; count: number; author: string; before: string; after: string; commits?: PushCommit[] };
+// Store subjects, ordering and parent counts; never trust webhook-provided URLs.
+function pushCommits(values: unknown): PushCommit[] {
+  if (!Array.isArray(values)) return [];
+  return [...new Map(values.flatMap(c => {
+    if (!c || typeof c.id !== 'string' || !/^[a-f0-9]{40,64}$/.test(c.id)) return [];
+    const message = typeof c.message === 'string' ? c.message : typeof c.title === 'string' ? c.title : '';
+    const subject = redact(message).trim().split(/[\r\n]/, 1)[0]!.trim().slice(0, 500);
+    if (!subject) return [];
+    const timestamp = Date.parse(c.timestamp ?? c.committed_date ?? c.created_at);
+    const parents = Array.isArray(c.parent_ids) && c.parent_ids.every((id: unknown) => typeof id === 'string' && /^[a-f0-9]{40,64}$/.test(id)) ? c.parent_ids : undefined;
+    return [[c.id, { id: c.id, subject, timestamp: Number.isFinite(timestamp) ? timestamp : null, ...(parents ? { parentCount: parents.length } : {}) }] as const];
+  })).values()];
+}
+
+export function givenName(display: string): string {
+  const name = display.split(/[\[(_]/, 1)[0]!.trim();
+  if (!name) return '작성자';
+  const parts = name.split(/\s+/), first = parts[0]!;
+  if (/^[가-힣]$/.test(first) && parts[1]) return parts[1];
+  if (/^[가-힣]{2,4}$/.test(first)) return first.slice(/^(남궁|황보|제갈|선우|독고|서문|사공|동방)/.test(first) ? 2 : 1);
+  return first;
+}
+
+export function renderNotification(target: Target, notification: Notification, author: string): string {
+  const project = `${target.instance}/${target.repository.split('/').map(encodeURIComponent).join('/')}`;
+  if (notification.kind === 'push') {
+    const who = plain(givenName(notification.author)), branch = plain(redact(notification.branch));
+    const created = /^0+$/.test(notification.before);
+    const link = created ? `${project}/-/commits/${encodeURIComponent(notification.branch).replace(/[()]/g, c => c === '(' ? '%28' : '%29')}` : `${project}/-/compare/${notification.before}...${notification.after}`;
+    const commits = notification.commits ?? [];
+    const classified = commits.length === notification.count && commits.every(c => c.parentCount !== undefined);
+    const merges = commits.filter(c => c.parentCount !== undefined && c.parentCount > 1).length;
+    const counts = classified ? `신규/변경 커밋 ${notification.count - merges}개` : '신규/변경 커밋 수 확인 필요';
+    const headline = created ? `**${who}**님의 **새 브랜치가 생겼어요.** 🌱` : `**${who}**님의 **${counts}**가 올라왔어요. 🚀`;
+    const lines = created ? [] : [...commits].filter(c => c.parentCount !== undefined && c.parentCount <= 1)
+      .sort((a, b) => (a.timestamp ?? Infinity) - (b.timestamp ?? Infinity))
+      .map(c => {
+        const match = /^([a-zA-Z]+(?:\([^\r\n]*?\))?!?:)\s+(.+)$/.exec(c.subject);
+        const label = match ? `*${plain(match[1]!)}* **${plain(match[2]!)}**` : `**${plain(c.subject)}**`;
+        return `- [${label}](${project}/-/commit/${c.id})`;
+      });
+    return `${headline}\n[**${branch}**](${link})${lines.length ? '\n\n' + lines.join('\n') : ''}`;
+  }
+  const url = `${project}/-/merge_requests/${target.number}`;
+  const link = 'noteId' in notification ? `${url}#note_${notification.noteId}` : url;
+  const who = plain(givenName(notification.kind === 'commented' ? notification.author ?? author : author));
+  const labels = {
+    questions: `**${who}**님의 MR에 **질문이 준비됐어요.** 🧩`,
+    opened: `**${who}**님이 **새 MR**을 열었어요. 📬`,
+    reopened: `**${who}**님이 **MR을 다시 열었어요.** 🔄`,
+    merged: `**${who}**님의 **MR이 머지됐어요!** 🎉`,
+    closed: `**${who}**님의 **MR이 닫혔어요.** 🗃️`,
+    commented: `**${who}**님이 MR에 **댓글을 남겼어요.** 💬`,
+  };
+  const preview = notification.kind === 'commented' && notification.preview ? `\n\n*“${plain(redact(notification.preview))}”*` : '';
+  return `${labels[notification.kind]}\n[**MR !${target.number} · ${plain(redact(notification.title).slice(0, 500))}**](${link})${preview}`;
+}
+
+
+/** Destinations come from the local configuration. Save intent before attempting the HTTP write. */
+export class Notifications {
+  private readonly destinations = new Map<string, Platform>();
+  constructor(readonly store: Store, platforms: Platform[], readonly transport: typeof fetch = fetch) {
+    for (const platform of platforms) {
+      const config = platform.config;
+      if (config.platform === 'gitlab' && config.mode === 'publish' && config.notifications)
+        this.destinations.set(repositoryKey(config), platform);
+    }
+  }
+  enabled(target: Pick<Target, 'platform' | 'instance' | 'repository'>): boolean {
+    return this.destinations.has(repositoryKey(target));
+  }
+  scope(target: Pick<Target, 'platform' | 'instance' | 'repository'>): string {
+    const key = repositoryKey(target);
+    const config = this.destinations.get(key)?.config.notifications;
+    if (!config) throw new Error('Notification destination unavailable');
+    return `${key}:${JSON.stringify(config)}`;
+  }
+  startedAt(target: Pick<Target, 'platform' | 'instance' | 'repository'>, now: number): number {
+    const key = this.scope(target) + ':notifications';
+    const cursor = this.store.cursor(key);
+    if (cursor) return cursor.baseline;
+    this.store.saveScan(key, { baseline: now, through: now }, []);
+    return now;
+  }
+  enqueue(target: Target, source: string, payload: Notification | null): void {
+    if (!this.enabled(target)) return;
+    const scope = this.scope(target);
+    const key = createHash('sha256').update(`${scope}:${targetKey(target)}:${source}`).digest('hex');
+    this.store.db.prepare('INSERT OR IGNORE INTO notifications(key,repository,target,payload,state,error) VALUES(?,?,?,?,?,?)')
+      .run(key, scope, JSON.stringify(target), JSON.stringify(payload), payload ? 'queued' : 'skipped', payload ? null : 'incomplete_push_event');
+  }
+  async questionsPublished(platform: Platform, report: Report): Promise<void> {
+    if (!this.enabled(platform.config) || !hasChangeQuestions(report)) return;
+    const marker = summaryMarker(report.snapshot);
+    const comment = (await platform.comments(report.snapshot.number)).find(c => platform.owned(c) && c.body.includes(marker));
+    if (!comment || !/^\d+$/.test(comment.id)) throw new Error('Published question comment unavailable');
+    this.enqueue(report.snapshot, `questions:${marker}`, { kind: 'questions', title: report.snapshot.title, count: report.questions.length, noteId: comment.id });
+  }
+  async drain(active: Set<string>, signal: AbortSignal): Promise<void> {
+    for (const repository of active) {
+      if (signal.aborted) return;
+      const destination = this.destinations.get(repository);
+      if (!destination) continue;
+      const rows = this.store.db.prepare("SELECT key,target,payload,attempts FROM notifications WHERE repository=? AND state='queued' AND due<=? ORDER BY rowid LIMIT 50").all(this.scope(destination.config), Date.now());
+      for (const row of rows) {
+        if (signal.aborted) return;
+        const target = JSON.parse(String(row.target)) as Target;
+        const payload = JSON.parse(String(row.payload)) as Notification;
+        await this.deliver(String(row.key), target, payload, Number(row.attempts) + 1, destination);
+      }
+    }
+  }
+  private async deliver(key: string, target: Target, notification: Notification, attempt: number, platform: Platform): Promise<void> {
+    const settle = (state: string, error: string | null, due = 0) => {
+      this.store.db.prepare('UPDATE notifications SET state=?,error=?,due=?,attempts=? WHERE key=?').run(state, error, due, attempt, key);
+    };
+    const config = platform.config.notifications!;
+    let url: string;
+    try { url = webhookUrl(config.provider, credential(config.urlEnv)); }
+    catch {
+      this.store.db.prepare("UPDATE notifications SET error='destination_unavailable',due=? WHERE key=?").run(Date.now() + 60000, key);
+      return;
+    }
+    let author = '';
+    try {
+      if (notification.kind === 'push' && !/^0+$/.test(notification.before)) {
+        const compare = await platform.api.request(`${platform.root}/repository/compare?from=${notification.before}&to=${notification.after}&straight=true`);
+        const commits = pushCommits(compare?.commits);
+        if (compare?.compare_timeout || compare?.overflow || commits.length !== notification.count) throw new Error('Incomplete push range');
+        for (const commit of commits) {
+          if (commit.parentCount !== undefined) continue;
+          const detail = await platform.api.request(`${platform.root}/repository/commits/${commit.id}`);
+          const resolved = pushCommits([detail])[0];
+          if (resolved?.id !== commit.id || resolved.parentCount === undefined) throw new Error('Missing commit parents');
+          commit.parentCount = resolved.parentCount;
+        }
+        notification.commits = commits;
+      } else if (notification.kind !== 'push' && !(notification.kind === 'commented' && notification.author)) {
+        const mr = await platform.api.request(`${platform.root}/merge_requests/${target.number}`);
+        author = typeof mr.author?.name === 'string' ? mr.author.name : '';
+      }
+    } catch (error) {
+      if (error instanceof HttpError && error.retryAt)
+        this.store.db.prepare("UPDATE notifications SET error='source_rate_limited',due=? WHERE key=?").run(error.retryAt, key);
+      else settle(attempt < 3 ? 'queued' : 'failed', 'source_lookup_failed', Date.now() + 60000);
+      return;
+    }
+    const payload = webhookBody(config.provider, target, notification, author, key, config.channel);
+    settle('sending', null);
+    try {
+      const response = await this.transport(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), redirect: 'error', signal: AbortSignal.timeout(5000) });
+      await response.body?.cancel();
+      if (response.ok) settle('sent', null);
+      else if (response.status === 429 && attempt < 3) {
+        const retryAfter = response.headers.get('retry-after');
+        const seconds = Number(retryAfter);
+        const delay = retryAfter && Number.isFinite(seconds) ? seconds * 1000 : (Date.parse(retryAfter ?? '') - Date.now()) || 30000;
+        settle('queued', 'rate_limited', Date.now() + Math.max(1000, delay));
+      } else settle(response.status >= 500 ? 'uncertain' : 'failed', `http_${response.status}`);
+    } catch {
+      settle('uncertain', 'delivery_unknown');
+    }
+  }
+}
+
+
+export function webhookUrl(provider: NotificationProvider, value: string): string {
+  const url = new URL(trustedUrl(value));
+  if (loopback(url)) return url.href;
+  const valid = provider === 'webhook'
+    || (provider === 'mattermost' && /\/hooks\/[a-z0-9]+$/i.test(url.pathname))
+    || (provider === 'slack' && ['hooks.slack.com', 'hooks.slack-gov.com'].includes(url.hostname) && /^\/services\/[\w/-]+$/.test(url.pathname))
+    || (provider === 'discord' && ['discord.com', 'discordapp.com'].includes(url.hostname) && /^\/api(?:\/v\d+)?\/webhooks\/\d+\/[\w-]+$/.test(url.pathname));
+  if (!valid) throw new Error('선택한 서비스의 Incoming Webhook URL 형식을 확인하세요.');
+  return url.href;
+}
+
+function fitLines(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  const lines = text.split('\n');
+  let used = 0;
+  const keep = [];
+  for (const line of lines) {
+    if (used + line.length + 1 > limit - 80) break;
+    keep.push(line);
+    used += line.length + 1;
+  }
+  return [...keep, '… 나머지는 저장소 링크에서 확인할 수 있습니다.'].join('\n');
+}
+
+export function webhookBody(provider: NotificationProvider, target: Target, notification: Notification, author: string, id: string, channel?: string) {
+  const text = renderNotification(target, notification, author);
+  if (provider === 'mattermost') return { text, username: 'hey', ...(channel ? { channel } : {}) };
+  if (provider === 'discord') return { username: 'hey', embeds: [{ description: fitLines(text, 4096) }], allowed_mentions: { parse: [] } };
+  if (provider === 'slack') {
+    const safe = fitLines(text, 35000).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+      .replace(/\*\*([^*]+)\*\*/g, '*$1*')
+      .replace(/\[([^\n]+?)\]\((https?:[^\s)]+)\)/g, (_, label: string, url: string) => `<${url}|${label.replaceAll('|', '¦')}>`);
+    return { text: safe, link_names: 0, unfurl_links: false, unfurl_media: false };
+  }
+  return { version: 1, id, event: notification.kind, repository: { platform: target.platform, instance: target.instance, path: target.repository },
+    ...(target.number ? { mergeRequest: target.number } : {}), text };
+}

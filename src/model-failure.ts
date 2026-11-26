@@ -1,13 +1,12 @@
 import { z } from 'zod';
 
 export const FailureSchema = z.strictObject({
-  code: z.enum(['rate_limit', 'authentication', 'timeout', 'unavailable', 'invalid_output', 'unknown']),
+  code: z.enum(['rate_limit', 'authentication', 'timeout', 'unavailable', 'model_unavailable', 'invalid_output', 'unknown']),
   provider: z.enum(['claude', 'codex', 'ollama']).optional(),
   apiStatus: z.int().min(400).max(599).optional(),
   retryAt: z.iso.datetime().optional(),
 });
 export type FailureInfo = z.infer<typeof FailureSchema>;
-export const RunnerFailureSchema = z.strictObject({ error: z.literal('model_failure'), failure: FailureSchema });
 export class ModelFailure extends Error {
   constructor(readonly failure: FailureInfo) { super(`${failure.provider ?? 'model'} ${failure.code}${failure.code === 'invalid_output' ? ': no structured output' : ''}${failure.apiStatus ? ` (API ${failure.apiStatus})` : ''}`); }
 }
@@ -23,6 +22,7 @@ export function failureMessage(failure: FailureInfo): string {
   const messages: Record<FailureInfo['code'], string> = {
     rate_limit: `${provider} 사용량 제한${failure.apiStatus ? `(${failure.apiStatus})` : ''}으로 질문 생성을 잠시 멈췄습니다.`,
     authentication: `${provider} 인증을 확인할 수 없습니다. 봇 운영자가 로그인·키 설정을 확인해야 합니다.`,
+    model_unavailable: `${provider}에서 선택한 모델을 찾을 수 없습니다. 모델 설치와 이름을 확인하세요.`,
     timeout: '질문 생성 제한 시간을 초과했습니다.',
     unavailable: `${provider}에 일시적으로 연결할 수 없습니다.`,
     invalid_output: '질문의 출력 형식 또는 코드 근거 검증을 통과하지 못해 게시하지 못했습니다.',

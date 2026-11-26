@@ -3,8 +3,8 @@ export class HttpError extends Error {
 }
 export type TokenSource = () => Promise<string>;
 export class ApiClient {
-  private blockedUntil = 0;
-  constructor(readonly base: string, readonly platform: 'github' | 'gitlab', readonly token: TokenSource) {}
+  constructor(readonly base: string, readonly platform: 'github' | 'gitlab', readonly token: TokenSource,
+    private blockedUntil = 0, private readonly onLimit?: (retryAt: number) => void) {}
   async request(path: string, method = 'GET', body?: unknown, asText = false): Promise<any> {
     if (!path.startsWith('/') || path.startsWith('//')) throw new Error('Invalid API path');
     if (Date.now() < this.blockedUntil) throw new HttpError(429, 'Platform API rate limited', this.blockedUntil);
@@ -24,6 +24,7 @@ export class ApiClient {
         const delay = retry !== null && Number.isFinite(Number(retry)) ? Date.now() + Number(retry) * 1000 : Date.parse(retry ?? '');
         retryAt = Math.max(Date.now() + 1000, Number.isFinite(delay) ? delay : reset > Date.now() ? reset : Date.now() + 60000);
         this.blockedUntil = retryAt;
+        this.onLimit?.(retryAt);
       }
       await response.body?.cancel();
       throw new HttpError(response.status, `Platform API ${method} failed (${response.status})`, retryAt);

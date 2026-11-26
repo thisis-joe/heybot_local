@@ -157,15 +157,6 @@ export function renderQuestionThread(q: ChangeQuestion, s: Snapshot, number: num
   return [questionRevisionMarker(s), ...questionLines(q, s, `Q${number}`), '', ...lines(['이 스레드에 보기 문자(A~D)만 답글로 달아도 채점합니다. 이유를 덧붙여도 됩니다.', '정답·해설 보기: 이 스레드에 답글로 `/hey showanswer`'])].join('\n');
 }
 export function replyMarker(id: string): string { return `<!-- codereviewbot:reply:${id.replace(/[^\w-]/g, '')} -->`; }
-export function ackMarker(id: string): string { return `<!-- codereviewbot:ack:${id.replace(/[^\w-]/g, '')} -->`; }
-export type AckState = 'received' | 'failed' | 'closed';
-const ackText: Record<AckState, string> = {
-  received: '⏳ 요청을 접수했습니다. 처리하면 결과를 답글로 남기고 이 안내는 지웁니다.',
-  failed: '⚠️ 요청을 처리하지 못했습니다. 잠시 후 다시 요청하세요.',
-  closed: '🔒 이미 닫혔거나 머지된 PR/MR이라 요청을 처리하지 않았습니다. 열린 PR/MR에서 다시 요청하세요.',
-};
-/** Posted when a command arrives; deleted once the command finishes, or turned into a failure or closed notice. */
-export function renderAck(id: string, state: AckState = 'received'): string { return [ackMarker(id), ackText[state]].join('\n'); }
 // Each follow-up batch is published as a separate replyable question thread.
 // Interview batches (면접 or a mixed 꼬리/면접 morecs batch) point to both ways of continuing.
 export function renderQuestionBatch(questions: ChangeQuestion[], s: Snapshot, commentId: string, start = 1, prefix: '심화' | '면접' = '심화', labels = questions.map((_, i) => `${prefix}${start + i}`)): string {

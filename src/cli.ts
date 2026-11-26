@@ -3,23 +3,24 @@ import { parseArgs } from 'node:util';
 import { mkdir } from 'node:fs/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { z } from 'zod';
-import { ModelConfigSchema, RepositorySchema, credential, home, readConfig, repositoryKey, sameLogin, trustedUrl, writeConfig } from './config.js';
+import { ModelConfigSchema, RepositorySchema, NotificationProvider, notificationEnv, credential, home, readConfig, repositoryKey, sameLogin, trustedUrl, writeConfig } from './config.js';
 import { Store, watcherLock } from './store.js';
 import { Workspaces } from './workspace.js';
 import { Platform } from './platform.js';
 import { checkCodexLogin, createModel } from './models.js';
 import { Controller } from './controller.js';
-import { poll } from './poll.js';
+import { poll, pollLifecycle, pollPush } from './poll.js';
+import { Notifications } from './notifications.js';
 import { HttpError } from './http-client.js';
 import { ModelFailure, failureMessage } from './model-failure.js';
 import { maskSecret, redact } from './redact.js';
 
 const usage = `heybot_local
   connect github|gitlab OWNER/REPO --publisher LOGIN [--observe] [--token-env NAME] [--instance URL]
-      [--mattermost-env NAME] [--mattermost-channel NAME]
+      [--notify mattermost|slack|discord|webhook] [--notify-url-env NAME] [--notify-channel NAME]
   model codex [--model ID]
   model claude --model ID [--key-env NAME]
-  model ollama --model ID [--url URL]
+  model ollama --model ID [--url URL] [--context TOKENS]
   watch [--interval SECONDS] [--once]
   status
   retry JOB_ID
@@ -34,13 +35,18 @@ async function main(): Promise<void> {
   if (command === 'connect') {
     const { values, positionals: [platform, repository, ...rest] } = parseArgs({ args, allowPositionals: true, options: {
       publisher: { type: 'string' }, observe: { type: 'boolean' }, 'token-env': { type: 'string' }, instance: { type: 'string' },
-      'mattermost-env': { type: 'string' }, 'mattermost-channel': { type: 'string' },
+      notify: { type: 'string' }, 'notify-url-env': { type: 'string' }, 'notify-channel': { type: 'string' },
     } });
     if (rest.length || !values.publisher) throw new Error('connect에 플랫폼, 저장소 경로, --publisher 계정을 지정하세요.');
+    const destination = values.notify ? NotificationProvider.parse(values.notify) : undefined;
+    if (!destination && (values['notify-url-env'] || values['notify-channel']))
+      throw new Error('--notify에 알림 서비스를 지정하세요.');
     const repo = RepositorySchema.parse({ platform, repository, botLogin: values.publisher, mode: values.observe ? 'observe' : 'publish',
       tokenEnv: values['token-env'] ?? (platform === 'github' ? 'GITHUB_TOKEN' : 'GITLAB_TOKEN'),
       instance: values.instance ?? (platform === 'github' ? 'https://api.github.com' : 'https://gitlab.com'),
-      mattermostWebhookEnv: values['mattermost-env'], mattermostChannel: values['mattermost-channel'] });
+      notifications: destination ? {
+        provider: destination, urlEnv: values['notify-url-env'] ?? notificationEnv[destination], channel: values['notify-channel'],
+      } : undefined });
     const client = new Platform(repo, async () => credential(repo.tokenEnv));
     await verifyAccount(client);
     await client.api.request(client.root);
@@ -52,11 +58,11 @@ async function main(): Promise<void> {
   }
   if (command === 'model') {
     const { values, positionals: [provider, ...rest] } = parseArgs({ args, allowPositionals: true, options: {
-      model: { type: 'string' }, 'key-env': { type: 'string' }, url: { type: 'string' },
+      model: { type: 'string' }, 'key-env': { type: 'string' }, url: { type: 'string' }, context: { type: 'string' },
     } });
     if (rest.length) throw new Error('모델 제공자를 하나 지정하세요.');
     config.model = ModelConfigSchema.parse({ provider, model: values.model,
-      ...(values.url !== undefined ? { url: trustedUrl(values.url, true) } : {}), ...(values['key-env'] ? { keyEnv: values['key-env'] } : {}) });
+      ...(values.context !== undefined ? { context: Number(values.context) } : {}), ...(values.url !== undefined ? { url: trustedUrl(values.url, true) } : {}), ...(values['key-env'] ? { keyEnv: values['key-env'] } : {}) });
     if (config.model.provider === 'codex') await checkCodexLogin();
     await writeConfig(dir, config);
     console.log(`모델 설정됨 (${config.model.provider}${config.model.model ? ` / ${config.model.model}` : ''})`);
@@ -88,14 +94,19 @@ async function main(): Promise<void> {
       process.on('SIGTERM', stop);
       try {
         store.recoverClaims();
+        if (!values.once) console.log(`${config.repositories.length}개 저장소 감시 시작 (${seconds}초 간격)`);
         for (const repo of config.repositories) {
           maskSecret(process.env[repo.tokenEnv]);
-          if (repo.mattermostWebhookEnv) maskSecret(process.env[repo.mattermostWebhookEnv]);
+          if (repo.notifications) maskSecret(process.env[repo.notifications.urlEnv]);
         }
         if (config.model?.provider === 'claude') maskSecret(process.env[config.model.keyEnv]);
-        const platforms = config.repositories.map(repo => new Platform(repo, async () => credential(repo.tokenEnv)));
+        const platforms = config.repositories.map(repo => {
+          const key = repositoryKey(repo);
+          return new Platform(repo, async () => credential(repo.tokenEnv), store.apiLimit(key), until => store.saveApiLimit(key, until));
+        });
+        const notifications = new Notifications(store, platforms);
         const workspaces = new Workspaces(dir);
-        const controller = new Controller(store, platforms, workspaces, config.model ? createModel(config.model) : { run: async () => { throw new Error('모델이 없습니다.'); } });
+        const controller = new Controller(store, platforms, workspaces, config.model ? createModel(config.model) : { run: async () => { throw new Error('모델이 없습니다.'); } }, notifications);
         do {
           const active = new Set<string>();
           let failed = false;
@@ -104,14 +115,17 @@ async function main(): Promise<void> {
             try {
               await verifyAccount(platform);
               if (platform.config.mode === 'publish') active.add(repositoryKey(platform.config));
-              await poll(platform, store);
+              await poll(platform, store, Date.now(), notifications);
             } catch (error) {
               failed = true;
               console.error(`${platform.config.repository} 조회 실패. ${message(error)}`);
             }
           }
           while (!abort.signal.aborted) {
-            const job = store.claim(target => active.has(repositoryKey(target)));
+            const job = store.claim(target => {
+              const key = repositoryKey(target);
+              return active.has(key) && store.apiLimit(key) <= Date.now();
+            });
             if (!job) break;
             await controller.perform(job);
           }
@@ -119,7 +133,15 @@ async function main(): Promise<void> {
             try { await controller.reconcile(platform); }
             catch (error) { failed = true; console.error(`${platform.config.repository} 채점 상태 갱신 실패. ${message(error)}`); }
           }
-          await workspaces.cleanup();
+          for (const platform of platforms.filter(p => active.has(repositoryKey(p.config)) && notifications.enabled(p.config))) {
+            for (const scan of [pollLifecycle, pollPush]) {
+              try { await scan(platform, store, notifications); }
+              catch (error) { failed = true; console.error(`${platform.config.repository} 협업 알림 이벤트 조회 실패. ${message(error)}`); }
+            }
+          }
+          await notifications.drain(active, abort.signal);
+          try { await workspaces.cleanup(); }
+          catch { console.error('임시 소스 보관 폴더 정리를 완료하지 못했습니다.'); }
           if (values.once) { if (failed) process.exitCode = 1; break; }
           if (!abort.signal.aborted) await sleep(seconds * 1000, undefined, { signal: abort.signal }).catch(() => {});
         } while (!abort.signal.aborted);

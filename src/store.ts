@@ -67,6 +67,13 @@ export class Store {
         command_result TEXT, error TEXT, synced INTEGER NOT NULL DEFAULT 0,
         UNIQUE(target_key, delivery)
       );
+      CREATE TABLE IF NOT EXISTS notifications (
+        key TEXT PRIMARY KEY, repository TEXT NOT NULL, target TEXT NOT NULL, payload TEXT NOT NULL,
+        state TEXT NOT NULL, due INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS notifications_queue ON notifications(repository,state,due);
+      CREATE TABLE IF NOT EXISTS api_limits (key TEXT PRIMARY KEY, until INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS mr_states (target TEXT PRIMARY KEY, state TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(state,due,sequence);
       CREATE INDEX IF NOT EXISTS jobs_history ON jobs(target_key,sequence);
     `);
@@ -91,12 +98,25 @@ export class Store {
       this.db.prepare('INSERT INTO cursors VALUES(?,?) ON CONFLICT(key) DO UPDATE SET data=excluded.data').run(key, JSON.stringify(cursor));
     });
   }
+  apiLimit(key: string): number {
+    return Number(this.db.prepare('SELECT until FROM api_limits WHERE key=?').get(key)?.until ?? 0);
+  }
+  saveApiLimit(key: string, until: number): void {
+    this.db.prepare('INSERT INTO api_limits VALUES(?,?) ON CONFLICT(key) DO UPDATE SET until=max(until,excluded.until)').run(key, until);
+  }
+  mrState(target: Target): string | undefined {
+    return this.db.prepare('SELECT state FROM mr_states WHERE target=?').get(targetKey(target))?.state as string | undefined;
+  }
+  rememberMrState(target: Target, state: string): void {
+    this.db.prepare('INSERT INTO mr_states VALUES(?,?) ON CONFLICT(target) DO UPDATE SET state=excluded.state').run(targetKey(target), state);
+  }
   enqueue(event: Event): void {
     this.db.prepare('INSERT OR IGNORE INTO jobs(id,target_key,delivery,kind,body,state) VALUES(?,?,?,?,?,\'queued\')')
       .run(randomUUID(), targetKey(event.target), event.deliveryId, event.kind, JSON.stringify(event));
   }
   /** The watcher holds the process lock before resetting interrupted work. */
   recoverClaims(): void {
+    this.db.exec("UPDATE notifications SET state='uncertain',error='delivery_interrupted' WHERE state='sending'");
     this.db.exec(`UPDATE jobs SET state=CASE state WHEN 'publishing' THEN 'ready' ELSE 'queued' END,
       due=max(due,CASE WHEN state='publishing' OR kind='command' THEN unixepoch()*1000+60000 ELSE 0 END), owner=NULL
       WHERE state IN ('running','publishing')`);
@@ -192,13 +212,15 @@ export class Store {
   }
   retry(id: string): boolean {
     return Boolean(this.db.prepare(`UPDATE jobs SET state=CASE WHEN result IS NOT NULL AND json_extract(result,'$.state')!='failed' THEN 'ready' ELSE 'queued' END,
-      result=CASE WHEN json_extract(result,'$.state')='failed' THEN NULL ELSE result END, attempts=0,due=0,error=NULL
+      result=CASE WHEN json_extract(result,'$.state')='failed' THEN NULL ELSE result END, attempts=0,error=NULL
       WHERE id=? AND state='failed'`).run(id).changes);
   }
   status() {
     return {
       jobs: this.db.prepare('SELECT state,count(*) AS count FROM jobs GROUP BY state').all(),
-      failures: this.db.prepare("SELECT id,kind,error FROM jobs WHERE state='failed' ORDER BY sequence DESC LIMIT 20").all(),
+      failures: this.db.prepare("SELECT id,kind,coalesce(error,json_extract(result,'$.summary')) AS error FROM jobs WHERE state='failed' ORDER BY sequence DESC LIMIT 20").all(),
+      notifications: this.db.prepare('SELECT state,error,count(*) AS count FROM notifications GROUP BY state,error').all(),
+      apiLimits: this.db.prepare('SELECT key,until FROM api_limits WHERE until>? ORDER BY key').all(Date.now()),
       cursors: this.db.prepare('SELECT key,data FROM cursors ORDER BY key').all().map(row => ({ key: row.key, ...JSON.parse(String(row.data)) })),
     };
   }

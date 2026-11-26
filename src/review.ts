@@ -8,7 +8,6 @@ export interface DiffMetadata { oldPath: string; positions?: Record<'LEFT' | 'RI
 export interface DiffFile extends DiffMetadata { patch: string; lines: Set<number>; oldLines?: Set<number> }
 export interface ReviewContext { files: Record<string, string>; baseFiles?: Record<string, string>; diff: Record<string, DiffFile>; excluded: string[]; limited: boolean; sourceDir: string; changesSincePrevious?: { fromHeadSha: string; files: Record<string, { oldPath: string; patch: string }> } }
 export type ModelPhase = 'answer' | 'initial_questions' | 'verify_initial_questions' | 'repair_initial_questions' | 'questions' | 'csinterview' | 'morecs' | 'grade';
-export const INITIAL_QUESTION_CHECK_HEADER = 'x-hey-initial-question-check';
 export interface InitialQuestionDraft { output: unknown; verify: boolean }
 export interface Model {
   run(phase: ModelPhase, prompt: string, workspaceId: string, timeoutMs?: number): Promise<unknown>;

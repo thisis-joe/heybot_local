@@ -6,6 +6,8 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
+import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { initialQuestions, answerKey } from './fixtures.mjs';
 
@@ -37,8 +39,9 @@ export async function localFixture(t, kind, command = [process.execPath, new URL
   const dir = await mkdtemp(join(tmpdir(), 'heybot-http-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const { base, head, objects } = await makeGitFixture(dir, gitlab);
-  const general = [], review = [], modelCalls = [], statuses = [], requests = [];
-  let updated = '2025-01-01T00:00:00.000Z', merged = null, state = gitlab ? 'opened' : 'open', lost = false, limited = false;
+  let nextNote = 1;
+  const general = [], review = [], modelCalls = [], statuses = [], requests = [], notices = [], transitions = [], pushes = [];
+  let updated = '2025-01-01T00:00:00.000Z', created = updated, merged = null, state = gitlab ? 'opened' : 'open', lost = false, lostNotification = false, limited = false;
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url, origin);
@@ -53,6 +56,11 @@ export async function localFixture(t, kind, command = [process.execPath, new URL
         try { const value = await readFile(join(objects, name)); res.writeHead(200); res.end(value); } catch { res.writeHead(404); res.end(); }
         return;
       }
+      if (path === '/hooks/fixture') {
+        notices.push(body);
+        if (lostNotification) { lostNotification = false; req.socket.destroy(); return; }
+        return json({ ok: true });
+      }
       if (path === '/api/tags') return json({ models: [{ name: 'fixture:latest', digest: '0'.repeat(64), size: 42 }] });
       if (path === '/api/chat') {
         modelCalls.push(body);
@@ -66,7 +74,7 @@ export async function localFixture(t, kind, command = [process.execPath, new URL
       requests.push([req.method, path, Number(url.searchParams.get('page') || 1)]);
       const page = Number(url.searchParams.get('page') || 1), per = Number(url.searchParams.get('per_page') ?? 100);
       const paginated = rows => json(rows.slice((page - 1) * per, page * per));
-      const pull = { number: 1, iid: 1, state, created_at: '2025-01-01T00:00:00.000Z', updated_at: updated, merged_at: merged, title: '결제', body: '결제 변경', description: '결제 변경',
+      const pull = { number: 1, iid: 1, state, created_at: created, updated_at: updated, merged_at: merged, title: '결제', body: '결제 변경', description: '결제 변경',
         head: { sha: head }, base: { sha: base }, merged: Boolean(merged), merge_commit_sha: head, html_url: `${origin}/owner/repo/pull/1`, web_url: `${origin}/owner/repo/-/merge_requests/1`,
         diff_refs: { head_sha: head, base_sha: base, start_sha: base }, author: { username: 'owner', name: 'Owner' } };
       if (path === '/user' || path === '/api/v4/user') return json({ login: 'owner', username: 'owner', id: 3 });
@@ -77,14 +85,28 @@ export async function localFixture(t, kind, command = [process.execPath, new URL
       if (!route) return json({ id: 1, web_url: `${origin}/owner/repo` });
       if (route.startsWith('/collaborators/')) return json({ permission: route.includes('/visitor/') ? 'read' : 'write' });
       if (route === '/members/all/3') return json({ access_level: 30 });
-      if (route === (gitlab ? '/merge_requests' : '/pulls')) return paginated([pull]);
+      if (route === (gitlab ? '/merge_requests' : '/pulls')) {
+        const after = url.searchParams.get('updated_after');
+        return paginated(!after || Date.parse(updated) >= Date.parse(after) ? [pull] : []);
+      }
       if (route === (gitlab ? '/merge_requests/1' : '/pulls/1')) return json(pull);
       if (route.startsWith('/compare/')) return json({ merge_base_commit: { sha: base } });
       if (route.endsWith('/status')) return json({ statuses: statuses.map(status => ({ ...status, context: status.context })).slice(-1) });
       if (route === `/commits/${head}`) return json({ parents: [{ sha: base }] });
       if (route === `/repository/commits/${head}/statuses`) return paginated(statuses.map((s, i) => ({ ...s, status: s.state, id: i + 1 })));
       if (route === `/statuses/${head}`) { statuses.push(body); return json(body, 201); }
-      if (route === '/merge_requests/1/pipelines' || route === '/events' || route.endsWith('/resource_state_events')) return paginated([]);
+      if (route === '/merge_requests/1/pipelines') return paginated([]);
+      if (route === '/events') return paginated(pushes.toReversed());
+      if (route.endsWith('/resource_state_events')) return paginated(transitions);
+      if (route === '/repository/compare') {
+        assert.equal(url.searchParams.get('straight'), 'true');
+        assert.equal(url.searchParams.get('from'), base);
+        assert.equal(url.searchParams.get('to'), head);
+        return json({ commits: [
+          { id: head, title: 'fix: 결제 처리', committed_date: updated, parent_ids: [base] },
+          { id: '9'.repeat(40), title: '이 제목은 병합처럼 보이지 않음', committed_date: updated, parent_ids: [base, head] },
+        ] });
+      }
       if (route === '/issues/comments' && limited) {
         limited = false;
         res.writeHead(429, { 'retry-after': '1' }); res.end('{}'); return;
@@ -107,7 +129,10 @@ export async function localFixture(t, kind, command = [process.execPath, new URL
         if (req.method === 'GET') {
           if (!gitlab) return paginated(review);
           const groups = Map.groupBy(review, note => note.discussion_id);
-          return paginated([...groups].map(([id, notes]) => ({ id, individual_note: false, notes })));
+          return paginated([
+            ...general.map(note => ({ id: `standalone-${note.id}`, individual_note: true, notes: [note] })),
+            ...[...groups].map(([id, notes]) => ({ id, individual_note: false, notes })),
+          ]);
         }
         const row = add(review, body.body, null, 'owner', `thread${review.length}`);
         if (lost) { lost = false; req.socket.destroy(); return; }
@@ -122,23 +147,36 @@ export async function localFixture(t, kind, command = [process.execPath, new URL
   t.after(() => server.close());
   const origin = `http://127.0.0.1:${server.address().port}`;
   const add = (surface, body, parent = null, author = 'owner', discussion) => {
-    const now = new Date().toISOString(), id = surface.length + 1;
+    const now = new Date().toISOString(), id = gitlab ? nextNote++ : surface.length + 1;
     const row = { id, body, created_at: now, updated_at: now, user: { login: author, type: 'User' }, author: { username: author, name: author },
       issue_url: `${origin}/repos/owner/repo/issues/1`, pull_request_url: `${origin}/repos/owner/repo/pulls/1`,
       html_url: `${origin}/owner/repo/pull/1#comment-${id}`, in_reply_to_id: parent, discussion_id: discussion };
     surface.push(row);
     return row;
   };
-  const env = { ...process.env, HEYBOT_HOME: join(dir, 'profile'), GITHUB_TOKEN: safeToken, GITLAB_TOKEN: safeToken };
-  const cli = async (...args) => execFile(command[0], [...command.slice(1), ...args], { env, timeout: 25000 });
-  return { cli, dir, origin, general, review, statuses, requests, modelCalls,
-    open: () => { updated = new Date().toISOString(); state = gitlab ? 'opened' : 'open'; },
-    close: () => { updated = new Date().toISOString(); state = 'closed'; },
+  const env = { ...process.env, HEYBOT_HOME: join(dir, 'profile'), GITHUB_TOKEN: safeToken, GITLAB_TOKEN: safeToken,
+    FIXTURE_WEBHOOK: `${origin}/hooks/fixture` };
+  const cliWith = (overrides = {}) => async (...args) => execFile(command[0], [...command.slice(1), ...args], { env: { ...env, ...overrides }, timeout: 25000 });
+  const cli = cliWith();
+  const transition = status => {
+    updated = new Date().toISOString();
+    if (gitlab) transitions.push({ id: transitions.length + 1, state: status, created_at: updated });
+    state = status;
+  };
+  return { cli, cliWith, env, dir, origin, general, review, statuses, requests, modelCalls, notices,
+    open: () => transition(gitlab ? 'opened' : 'open'),
+    create: () => { created = updated = new Date().toISOString(); state = gitlab ? 'opened' : 'open'; },
+    close: () => transition('closed'),
+    push: (action, ref = 'main') => pushes.push({ id: pushes.length + 1, created_at: new Date().toISOString(),
+      author: { name: '이개발 (팀)' }, push_data: action === 'bulk' ? { ref_count: 3 } : {
+        action, ref_type: 'branch', ref, commit_count: 2, commit_from: action === 'created' ? null : base,
+        commit_to: action === 'removed' ? null : head,
+      } }),
     merge: () => { updated = merged = new Date().toISOString(); state = gitlab ? 'merged' : 'closed'; },
     oldMerge: () => { state = gitlab ? 'merged' : 'closed'; merged = updated; },
     note: (body, author) => add(general, body, null, author),
     reply: (root, body) => add(review, body, root.id, 'owner', root.discussion_id),
-    loseWrite: () => { lost = true; }, rateLimit: () => { limited = true; } };
+    loseWrite: () => { lost = true; }, loseNotification: () => { lostNotification = true; }, rateLimit: () => { limited = true; } };
 }
 
 export async function runFlow(t, platform, bin) {
@@ -154,7 +192,7 @@ export async function runFlow(t, platform, bin) {
   assert.equal(f.modelCalls.length, 0, 'opening or reopening is not automatic generation');
   f.merge();
   const first = await f.cli('watch', '--once');
-  assert.equal(first.stderr, '');
+  assert.doesNotMatch(first.stderr, /조회 실패|jobId/);
   assert.equal(f.modelCalls.length, 1);
   assert.equal(f.review.length, 2);
   const summary = f.general.find(c => c.body.includes('codereviewbot:summary'));
@@ -179,3 +217,139 @@ export async function runFlow(t, platform, bin) {
 test('GitHub CLI discovers a merge and both comment surfaces across restarts', async t => {
   await runFlow(t, 'github', process.env.HEYBOT_PACKED_BIN ? [process.env.HEYBOT_PACKED_BIN] : undefined);
 });
+
+test('GitLab CLI discovers an MR merge and notes and discussion replies on a merged MR', async t => {
+  await runFlow(t, 'gitlab', process.env.HEYBOT_PACKED_BIN ? [process.env.HEYBOT_PACKED_BIN] : undefined);
+});
+
+test('a paginated scan preserves its cursor when rate limited and resumes after reset', async t => {
+  const f = await localFixture(t, 'github');
+  await f.cli('connect', 'github', 'owner/repo', '--publisher', 'owner', '--instance', f.origin);
+  await f.cli('model', 'ollama', '--model', 'fixture', '--url', f.origin);
+  await f.cli('watch', '--once');
+  const before = JSON.parse((await f.cli('status')).stdout).cursors;
+  for (let n = 0; n < 100; n++) f.note(`ordinary comment ${n}`);
+  f.note('/reviewbot help');
+  f.rateLimit();
+  await assert.rejects(f.cli('watch', '--once'), /429/);
+  assert.deepEqual(JSON.parse((await f.cli('status')).stdout).cursors, before);
+  const requests = f.requests.length;
+  await assert.rejects(f.cli('watch', '--once'), /rate limited/);
+  assert.equal(f.requests.length, requests);
+  await delay(1150);
+  await f.cli('watch', '--once');
+  assert.ok(f.requests.some(([, path, page]) => path === '/repos/owner/repo/issues/comments' && page === 2));
+  assert.equal(f.general.filter(c => c.body.startsWith('<!-- codereviewbot:reply:issue-101 -->')).length, 1);
+});
+
+test('an accepted inline write with a lost response is reconciled after restart without another model call', async t => {
+  const f = await localFixture(t, 'github');
+  await f.cli('connect', 'github', 'owner/repo', '--publisher', 'owner', '--instance', f.origin);
+  await f.cli('model', 'ollama', '--model', 'fixture', '--url', f.origin);
+  await f.cli('watch', '--once');
+  f.merge();
+  f.loseWrite();
+  await f.cli('watch', '--once');
+  assert.equal(f.review.length, 1);
+  assert.equal(f.modelCalls.length, 1);
+  const db = new DatabaseSync(join(f.env.HEYBOT_HOME, 'state.sqlite'));
+  db.prepare("UPDATE jobs SET due=0 WHERE state='ready'").run();
+  db.close();
+  await f.cli('watch', '--once');
+  assert.equal(f.review.length, 2);
+  assert.equal(f.modelCalls.length, 1);
+  assert.equal(f.general.filter(c => c.body.includes('codereviewbot:summary')).length, 1);
+});
+
+test('the designated publisher posts while an observer stays read-only', async t => {
+  const f = await localFixture(t, 'github');
+  const observer = f.cliWith({ HEYBOT_HOME: join(f.dir, 'observer') });
+  await assert.rejects(f.cli('connect', 'github', 'owner/repo', '--publisher', 'different', '--instance', f.origin), /게시 계정/);
+  await f.cli('connect', 'github', 'owner/repo', '--publisher', 'owner', '--instance', f.origin);
+  await observer('connect', 'github', 'owner/repo', '--publisher', 'owner', '--instance', f.origin, '--observe');
+  await f.cli('model', 'ollama', '--model', 'fixture', '--url', f.origin);
+  await Promise.all([f.cli('watch', '--once'), observer('watch', '--once')]);
+  f.merge();
+  await Promise.all([f.cli('watch', '--once'), observer('watch', '--once')]);
+  assert.equal(f.modelCalls.length, 1);
+  assert.equal(f.general.filter(c => c.body.includes('codereviewbot:summary')).length, 1);
+  assert.equal(JSON.parse((await observer('status')).stdout).jobs.length, 0);
+});
+
+test('requireAnswers reads the pinned target policy and marks the exact head successful after answers', async t => {
+  const f = await localFixture(t, 'gitlab');
+  await f.cli('connect', 'gitlab', 'owner/repo', '--publisher', 'owner', '--instance', f.origin);
+  await f.cli('model', 'ollama', '--model', 'fixture', '--url', f.origin);
+  await f.cli('watch', '--once');
+  f.note('/hey tryagain');
+  await f.cli('watch', '--once');
+  assert.equal(f.statuses.at(-1).state, 'pending');
+  assert.equal(f.statuses.at(-1).name, 'codereviewbot/questions');
+  f.note('/hey answer Q1 B Q2 A');
+  await f.cli('watch', '--once');
+  assert.deepEqual(f.statuses.map(status => status.state), ['pending', 'success']);
+});
+
+test('GitLab notifications cover lifecycle, people, questions, pushes and new branches without live webhooks', async t => {
+  const f = await localFixture(t, 'gitlab');
+  await f.cli('connect', 'gitlab', 'owner/repo', '--publisher', 'owner', '--instance', f.origin,
+    '--notify', 'mattermost', '--notify-url-env', 'FIXTURE_WEBHOOK', '--notify-channel', 'learning');
+  await f.cli('model', 'ollama', '--model', 'fixture', '--url', f.origin);
+  await f.cli('watch', '--once');
+  assert.equal(f.notices.length, 0);
+  f.create();
+  await f.cli('watch', '--once');
+  f.close();
+  f.open();
+  f.note('같은 계정의 사람 댓글 @here');
+  f.push('pushed');
+  f.push('created', 'topic');
+  f.push('removed', 'deleted');
+  f.push('bulk');
+  await f.cli('watch', '--once');
+  assert.equal(f.modelCalls.length, 0);
+  f.merge();
+  await f.cli('watch', '--once');
+  await f.cli('watch', '--once');
+  const texts = f.notices.map(payload => payload.text);
+  assert.equal(texts.length, 8);
+  assert.ok(f.notices.every(payload => payload.channel === 'learning' && payload.username === 'hey'));
+  for (const emoji of ['📬', '🗃️', '🔄', '🎉', '💬', '🧩', '🚀', '🌱']) assert.equal(texts.filter(text => text.includes(emoji)).length, 1);
+  const comment = texts.find(text => text.includes('💬'));
+  assert.match(comment, /#note_\d+/);
+  assert.match(comment, /같은 계정의 사람 댓글/);
+  assert.doesNotMatch(comment, /@here/);
+  const pushed = texts.find(text => text.includes('🚀'));
+  assert.match(pushed, /신규\/변경 커밋 1개/);
+  assert.match(pushed, /결제 처리/);
+  assert.doesNotMatch(pushed, /이 제목은 병합/);
+  assert.ok(JSON.parse((await f.cli('status')).stdout).notifications.some(row => row.state === 'skipped' && row.count === 1));
+});
+
+for (const provider of ['slack', 'discord', 'webhook']) {
+  test(`${provider} is selectable and safely sends the provider's webhook payload`, async t => {
+    const f = await localFixture(t, 'gitlab');
+    await f.cli('connect', 'gitlab', 'owner/repo', '--publisher', 'owner', '--instance', f.origin, '--notify', provider, '--notify-url-env', 'FIXTURE_WEBHOOK');
+    await f.cli('model', 'ollama', '--model', 'fixture', '--url', f.origin);
+    await f.cli('watch', '--once');
+    f.note('댓글 <@everyone> & 그대로');
+    if (provider === 'webhook') f.loseNotification();
+    await f.cli('watch', '--once');
+    await f.cli('watch', '--once');
+    assert.equal(f.notices.length, 1);
+    const [payload] = f.notices;
+    if (provider === 'slack') {
+      assert.match(payload.text, /<http:\/\/127\.0\.0\.1:[^|]+\|/);
+      assert.doesNotMatch(payload.text, /<@everyone>/);
+      assert.equal(payload.unfurl_links, false);
+    } else if (provider === 'discord') {
+      assert.deepEqual(payload.allowed_mentions, { parse: [] });
+      assert.match(payload.embeds[0].description, /💬/);
+    } else {
+      assert.equal(payload.version, 1);
+      assert.equal(payload.event, 'commented');
+      assert.equal(payload.mergeRequest, 1);
+      assert.ok(JSON.parse((await f.cli('status')).stdout).notifications.some(row => row.state === 'uncertain'));
+    }
+  });
+}
