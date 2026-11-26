@@ -67,7 +67,7 @@ async function codex(config: Extract<ModelConfig, { provider: 'codex' }>, phase:
     if (result.code !== 0) {
       const events = Buffer.concat([result.stdout, result.stderr]).toString('utf8');
       const code = /rate.limit|usage.limit|\b429\b/i.test(events) ? 'rate_limit'
-        : /unauthori[sz]ed|authenticat|\b401\b/i.test(events) ? 'authentication' : 'unavailable';
+        : /unauthori[sz]ed|authenticat|\b401\b/i.test(events) ? 'authentication' : /model.*(?:not found|not supported|not available)/i.test(events) ? 'model_unavailable' : 'unavailable';
       throw new ModelFailure({ provider: 'codex', code });
     }
     const bytes = await readFile(output);
@@ -111,7 +111,7 @@ async function httpModel(
   if (!response.ok) {
     await response.body?.cancel();
     throw new ModelFailure({ provider: config.provider, apiStatus: response.status, code: response.status === 429 ? 'rate_limit'
-      : [401, 403].includes(response.status) ? 'authentication' : response.status >= 500 || response.status === 404 ? 'unavailable' : 'invalid_output' });
+      : [401, 403].includes(response.status) ? 'authentication' : response.status === 404 ? 'model_unavailable' : response.status >= 500 ? 'unavailable' : 'invalid_output' });
   }
   const payload = JSON.parse(await boundedText(response, 512000));
   const raw = isClaude
@@ -119,6 +119,14 @@ async function httpModel(
     : (payload.done === true && !payload.remote_model && !payload.remote_host ? payload.message?.content : undefined);
   if (typeof raw !== 'string') throw new ModelFailure({ provider: config.provider, code: 'invalid_output' });
   return JSON.parse(raw);
+}
+
+function scrubOutput(value: unknown): unknown {
+  if (typeof value === 'string') return redact(value);
+  if (Array.isArray(value)) return value.map(scrubOutput);
+  if (value && typeof value === 'object')
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, scrubOutput(item)]));
+  return value;
 }
 
 export function createModel(config: ModelConfig, claudeEndpoint = 'https://api.anthropic.com/v1/messages'): Model {
@@ -129,7 +137,7 @@ export function createModel(config: ModelConfig, claudeEndpoint = 'https://api.a
         const output = config.provider === 'codex'
           ? await codex(config, phase, input, timeoutMs)
           : await httpModel(config, phase, input, timeoutMs, claudeEndpoint);
-        return phaseSchemas[phase].parse(output);
+        return phaseSchemas[phase].parse(scrubOutput(output));
       } catch (error) {
         if (error instanceof TypeError) throw new ModelFailure({ provider: config.provider, code: 'unavailable' });
         throw new ModelFailure(failureInfo(error, config.provider));

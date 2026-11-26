@@ -7,9 +7,9 @@
   "license": "MIT",
   "engines": { "node": "^22.13.0 || >=24.0.0" },
   "bin": { "heybot_local": "dist/cli.js" },
-  "files": ["dist", "docs/specs/heybot-local.md"],
+  "files": ["dist", "docs/specs/heybot-local.md", "docs/plans/heybot-local.md"],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
     "test": "npm run build && node --test test/*.test.mjs",
     "prepack": "npm run build"
   },

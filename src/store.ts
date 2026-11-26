@@ -218,6 +218,7 @@ export class Store {
   status() {
     return {
       jobs: this.db.prepare('SELECT state,count(*) AS count FROM jobs GROUP BY state').all(),
+      waiting: this.db.prepare("SELECT id,kind,state,due,error FROM jobs WHERE state IN ('queued','ready') ORDER BY due,sequence LIMIT 20").all(),
       failures: this.db.prepare("SELECT id,kind,coalesce(error,json_extract(result,'$.summary')) AS error FROM jobs WHERE state='failed' ORDER BY sequence DESC LIMIT 20").all(),
       notifications: this.db.prepare('SELECT state,error,count(*) AS count FROM notifications GROUP BY state,error').all(),
       apiLimits: this.db.prepare('SELECT key,until FROM api_limits WHERE until>? ORDER BY key').all(Date.now()),
