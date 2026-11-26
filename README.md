@@ -1,234 +1,102 @@
 # heybot_local
 
-GitHub PR과 GitLab MR을 개인 PC에서 감시하는 학습 봇입니다. 실제 머지된 변경을 읽어 한국어 객관식 질문 두 개를 만들고, PR/MR 요약과 diff 스레드에 게시합니다. PR/MR이 닫힌 뒤에도 댓글로 답하거나 해설을 볼 수 있습니다.
+GitHub PR과 GitLab MR이 머지되면 **변경을 이해했는지 확인하는 한국어 객관식 두 문항**을 게시합니다. PR/MR 댓글로 답을 내거나, 헷갈리는 문항의 해설을 볼 수 있습니다. 봇은 내 PC에서 실행되고, 나는 Codex·Claude·Ollama 중 사용할 모델을 고릅니다.
 
-## 설치와 실행
+## 빠른 시작
 
-Node.js 22.13 이상(22.x 또는 24 이상), npm, Git이 필요합니다. 감시 프로세스는 포그라운드에서 실행됩니다. 별도 서버, 공개 웹훅 주소, Docker와 외부 DB 서비스 없이 설치할 수 있습니다.
+Node.js 22.13 이상(22.x 또는 24 이상), npm, Git을 설치해 주세요. 별도 서버나 공개 웹훅 없이 사용할 수 있습니다.
+
+### 1. 설치
 
 ```sh
-npm install
-npm pack
-npm install -g ./heybot_local-0.3.0.tgz
+npm install -g heybot_local
+heybot_local --help
+```
 
-# 사용자 계정으로 먼저 공식 Codex CLI에 로그인합니다.
-codex login
-heybot_local model codex
+Windows PowerShell에서 npm 스크립트 실행이 차단되면 `npm.cmd install -g heybot_local`과 `heybot_local.cmd --help`를 실행하세요. 소스에서 설치하려면 저장소를 받은 뒤 `npm ci`, `npm pack`, `npm install -g ./heybot_local-0.3.0.tgz` 순으로 실행합니다.
 
-# GitHub CLI에 로그인한 계정의 토큰을 쓰는 예시입니다.
+### 2. 모델 고르기
+
+아래 셋 중 하나만 설정하면 됩니다. `MODEL_ID`는 사용하려는 모델 이름으로 바꾸세요.
+
+| 모델 | 먼저 준비할 것 | 설정 명령 |
+| --- | --- | --- |
+| Codex | 공식 Codex CLI를 설치하고 `codex login`으로 ChatGPT에 로그인 | `heybot_local model codex` |
+| Claude | Claude Platform API 키를 `ANTHROPIC_API_KEY` 환경 변수로 설정 | `heybot_local model claude --model MODEL_ID` |
+| Ollama | Ollama를 실행하고 `ollama list`에서 설치된 로컬 모델 이름 확인 | `heybot_local model ollama --model MODEL_ID` |
+
+Claude는 Platform API 키로 과금됩니다. Codex는 CLI에 로그인한 계정을 사용하고, Ollama는 기본적으로 내 PC의 `127.0.0.1:11434`에 연결합니다. [Codex 로그인](https://developers.openai.com/codex/auth/) · [Claude API](https://platform.claude.com/docs/en/api/overview) · [Ollama 시작하기](https://docs.ollama.com/quickstart)
+
+### 3. 저장소 연결하기
+
+`OWNER/REPO` 또는 `GROUP/PROJECT`는 저장소 주소의 경로입니다. `--publisher`에는 토큰을 발급받은 계정의 로그인 이름을 넣으세요.
+
+**GitHub**에서 이미 GitHub CLI를 쓰고 있다면 `gh auth login` 후 같은 터미널에서 실행하세요. GitHub CLI 없이 발급한 토큰도 `GITHUB_TOKEN` 환경 변수에 설정해 사용할 수 있습니다.
+
+```sh
 export GITHUB_TOKEN="$(gh auth token)"
-heybot_local connect github OWNER/REPO --publisher YOUR_GITHUB_LOGIN
+heybot_local connect github OWNER/REPO --publisher MY_GITHUB_LOGIN
+```
+
+PowerShell의 토큰 설정은 `$env:GITHUB_TOKEN = (gh auth token)`입니다.
+
+**GitLab**에서는 `api` 범위가 있는 토큰을 `GITLAB_TOKEN` 환경 변수에 설정한 뒤 실행하세요.
+
+```sh
+heybot_local connect gitlab GROUP/PROJECT --publisher MY_GITLAB_LOGIN
+```
+
+게시 계정에는 저장소 읽기와 PR/MR 댓글 쓰기 권한이 필요합니다. 같은 저장소를 팀에서 함께 쓴다면 **게시를 담당할 PC 한 대**를 정하세요. 다른 PC는 연결 명령 끝에 `--observe`를 붙이면 게시 없이 감시할 수 있습니다. 토큰 권한, 사내 주소, 인증서 설정은 [운영 가이드](docs/operations.md#저장소-연결과-권한)에 정리했습니다.
+
+### 4. 점검하고 감시 시작하기
+
+```sh
 heybot_local doctor
 heybot_local watch
 ```
 
-GitLab은 `GITLAB_TOKEN`을 설정하고 `heybot_local connect gitlab GROUP/PROJECT --publisher YOUR_GITLAB_LOGIN`으로 연결합니다. 여러 저장소를 연결할 수 있습니다. 사내 포지는 `--instance`, 저장소별 토큰은 `--token-env NAME`으로 지정합니다. GitHub Enterprise에서는 REST API 기본 URL을 사용합니다. GitLab에서는 인스턴스 기본 URL을 사용합니다.
+`doctor`는 현재 계정, 저장소 읽기, 권한 정보, 모델, 웹훅 설정을 조회합니다. `[실패]`가 있으면 표시된 항목부터 해결하세요. `[확인 필요]`나 `[메타데이터]`가 붙은 쓰기 권한은 실제 게시로 확인해야 합니다.
 
-| 사내 포지 | `--instance` 예시 | 인증과 Git 경로 |
-| --- | --- | --- |
-| GitHub Enterprise Server | `https://github.example.com/api/v3` | REST는 Bearer 토큰을 사용합니다. Git은 토큰을 HTTPS 비밀번호로 사용해 `https://github.example.com/OWNER/REPO.git`을 읽습니다. [GitHub REST 가이드](https://docs.github.com/en/enterprise-server@3.19/rest/using-the-rest-api/getting-started-with-the-rest-api) |
-| GitHub Enterprise Cloud (GHE.com) | `https://api.TENANT.ghe.com` | REST와 웹 호스트가 다릅니다. Git은 `https://TENANT.ghe.com/OWNER/REPO.git`을 읽습니다. [GHE.com REST 가이드](https://docs.github.com/en/enterprise-cloud@latest/rest/using-the-rest-api/getting-started-with-the-rest-api) |
-| GitLab Self-Managed | `https://git.example.com/gitlab` | `GROUP/SUBGROUP/PROJECT`도 연결할 수 있습니다. REST는 `/gitlab/api/v4`와 `PRIVATE-TOKEN` 헤더를 사용합니다. Git은 토큰을 HTTPS 비밀번호로 사용해 `/gitlab/GROUP/SUBGROUP/PROJECT.git`을 읽습니다. [GitLab 경로 접두어](https://docs.gitlab.com/install/relative_url/) · [토큰 인증](https://docs.gitlab.com/user/profile/personal_access_tokens/) |
+`watch`를 시작한 뒤 작은 PR/MR을 하나 머지해 보세요. 이전 머지는 건너뜁니다. 기본 조회 간격은 60초입니다. 새 머지를 찾으면 모델이 생성한 질문을 PR/MR 요약과 인라인 스레드에 게시합니다. 감시를 멈출 때는 `Ctrl+C`, 다른 터미널에서 상태를 볼 때는 `heybot_local status`를 사용합니다.
 
-사내 CA를 쓰면 신뢰할 PEM 번들의 절대 경로를 Node용 `NODE_EXTRA_CA_CERTS`와 Git용 `GIT_SSL_CAINFO`에 각각 설정한 셸에서 CLI를 시작합니다. Git for Windows의 CA 번들 처리는 TLS 백엔드에 따라 달라집니다. 인증서와 호스트 이름 검사는 유지됩니다. [Node 인증서 설정](https://nodejs.org/download/release/v22.13.0/docs/api/cli.html#node_extra_ca_certsfile) · [Git 인증서 설정](https://git-scm.com/docs/git-config#Documentation/git-config.txt-httpsslCAInfo)
+## PR/MR 댓글에서 사용하기
 
-| 설정 | 토큰 권한 |
+| 이렇게 쓰세요 | 동작 |
 | --- | --- |
-| GitHub | 지정 저장소에 대한 Contents 읽기, Pull requests 쓰기, Issues 댓글 쓰기와 collaborator 권한 조회. `requireAnswers`를 쓸 경우 Commit statuses 쓰기 |
-| GitLab | `api` 범위와 프로젝트의 MR·노트·디스커션·Git 읽기 권한. 상태를 게시할 계정은 Developer 이상 |
-| 댓글 사용자 | GitHub Write 또는 그 이상, GitLab Developer 또는 그 이상 |
+| `/hey help` | 사용 가능한 명령 보기 |
+| `/hey answer Q1 B Q2 C` | 여러 문항에 답하기. 보기 뒤에 근거를 적을 수도 있습니다. |
+| `/hey showanswer` | 질문 스레드에 답글로 남겨 해당 문항 해설 보기 |
+| `/hey whatelse` | 이번 변경의 심화 질문 요청 |
+| `/hey csinterview` · `/hey morecs` | 변경과 관련된 CS 면접 질문과 꼬리 질문 요청 |
+| `/hey tryagain` | 현재 코드 기준으로 새 질문 요청 |
+| `@hey 이 지점에서 왜 캐시를 지우나요?` | 변경 코드에 관한 질문 |
 
-`heybot_local status`는 감시 여부, 커서, 작업과 알림 상태, 실패 사유를 표시합니다. 기본 폴링 간격은 60초이며 `watch --interval 30`으로 변경할 수 있습니다. `watch --once`는 한 번 조회하고 실행 가능한 대기 작업을 처리합니다. `Ctrl+C`로 감시를 종료한 뒤 `connect` 또는 `model`로 설정을 바꾸고 `watch`를 다시 시작합니다.
+한 문항만 있는 인라인 스레드에서는 `B`처럼 보기 글자만 답해도 됩니다. GitHub에서 해설을 보려면 인라인 질문에 답글을 다세요. 명령을 쓰려는 사람에게는 GitHub Write 또는 GitLab Developer 이상의 역할이 필요합니다.
 
-## 설정 진단
+## 팀 채널에 알림 받기
 
-`heybot_local doctor`는 현재 프로필의 저장소 연결과 모델을 검사합니다. 각 연결에서 토큰 인증, 게시 계정 일치 여부, 저장소 메타데이터·커밋 목록·PR/MR 목록의 API 읽기를 확인합니다. 진단은 토큰 값, API 키, 웹훅 URL과 포지 응답 본문을 표시하지 않습니다.
+GitHub와 GitLab 모두에서 저장소별로 Slack, Mattermost, Discord, 일반 웹훅 중 한 곳을 지정할 수 있습니다. 서비스에서 발급한 Incoming Webhook URL을 해당 환경 변수에 설정하세요.
 
-- **`[확인]`**은 해당 조회나 설정 검사를 통과했다는 뜻입니다. 모델은 Codex CLI의 ChatGPT 로그인, Claude Models API의 키·모델 조회, Ollama의 로컬 모델 설치 여부를 확인합니다. 웹훅은 게시 연결에 설정된 주소의 형식만 검사합니다.
-- **`[메타데이터]`**는 쓰기와 관련된 권한 정보를 조회했다는 뜻입니다. GitHub는 OAuth 범위와 저장소 푸시 권한을, GitLab은 토큰의 `api` 범위와 프로젝트 역할을 사용합니다. `[확인 필요]`는 GitHub fine-grained 토큰처럼 권한 정보가 충분하지 않거나 조회할 수 없는 경우에 표시됩니다. 실제 댓글·커밋 상태 쓰기, 웹훅 수신, 모델 생성은 별도로 확인해야 합니다. 커밋 상태 쓰기는 `requireAnswers`를 사용할 때 필요합니다. [GitHub OAuth 범위](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps) · [GitLab 역할과 권한](https://docs.gitlab.com/user/permissions/)
-- **`[실패]`**가 있으면 종료 코드는 `1`입니다. `[확인 필요]`와 `[선택 기능]`은 종료 코드에 영향을 주지 않습니다. `[선택 기능]`은 `requireAnswers`에 필요한 권한 부족을 표시합니다. 관찰 모드에서는 게시 계정 일치, 쓰기 권한과 웹훅 검사를 건너뜁니다.
-
-진단 중에는 포지와 모델 설정을 조회합니다. 댓글 게시, 커밋 상태 갱신, 웹훅 발송, 모델 생성 요청은 수행하지 않습니다.
-
-## 모델
-
-| 선택 | 설정 | 인증 |
+| 서비스 | `--notify` | 환경 변수 |
 | --- | --- | --- |
-| Codex | `heybot_local model codex [--model ID]` | 사용자가 공식 CLI에서 끝낸 ChatGPT 로그인 |
-| Claude | `heybot_local model claude --model ID [--key-env NAME]` | Claude Platform API 키. 기본 변수 `ANTHROPIC_API_KEY` |
-| Ollama | `heybot_local model ollama --model ID [--url URL] [--context TOKENS]` | 로컬에 설치된 모델. 기본 주소 `http://127.0.0.1:11434`, 문맥 16,384 토큰 |
+| Slack | `slack` | `SLACK_WEBHOOK_URL` |
+| Mattermost | `mattermost` | `MATTERMOST_WEBHOOK_URL` |
+| Discord | `discord` | `DISCORD_WEBHOOK_URL` |
+| 일반 웹훅 | `webhook` | `HEYBOT_WEBHOOK_URL` |
 
-Claude Code의 개인 로그인과 달리, 이 npm 도구가 자동으로 요청을 보내는 방식에 Claude 구독 인증을 적용할 수 있는지는 확인되지 않았습니다. Claude 경로는 공식 Messages API 키를 사용합니다. Ollama는 로컬 전용 실행 시 `OLLAMA_NO_CLOUD=1 ollama serve`를 쓸 수 있습니다. 선택한 모델 실패 시 출력과 상태에 사유가 표시되며 다른 제공자로 넘어가지 않습니다. [Codex CLI](https://developers.openai.com/codex/noninteractive/) · [Claude 인증 조건](https://code.claude.com/docs/en/legal-and-compliance) · [Ollama 구조화 출력](https://docs.ollama.com/capabilities/structured-outputs) · [Ollama 로컬 실행](https://docs.ollama.com/faq#how-do-i-disable-ollamas-cloud-features)
-
-포지 토큰, 모델 API 키, 협업 웹훅 URL을 서로 다른 환경 변수로 관리합니다. 작업 트리를 체크아웃하지 않고 고정된 Git 객체를 읽습니다. 알려진 비밀 패턴과 설정한 인증 값, 민감 파일과 정책 제외 경로를 걸러낸 뒤 모델에 코드 발췌와 diff를 전달합니다. 리포지토리의 스크립트와 훅을 실행하지 않습니다. 비표준 형식의 하드코딩된 비밀은 필터를 통과할 수 있습니다.
-
-## 댓글 명령
-
-| 명령 | 동작 |
-| --- | --- |
-| `/hey help` | 사용법 표시 |
-| `/hey answer Q1 B Q2 C` | 여러 문항 채점. 선택지 뒤에 근거를 추가할 수 있으며, `Q-…` 질문 ID도 접수 |
-| `/hey showanswer` | 답글을 남긴 질문 스레드의 해설 표시 |
-| `/hey whatelse` | 현재 변경의 심화 질문 |
-| `/hey csinterview` | 변경과 관련된 CS 면접 질문 |
-| `/hey morecs` | 최근 면접 질문에 대한 꼬리 질문 |
-| `/hey tryagain` | 현재 코드 버전에서 질문 재생성 |
-| `@hey 질문` | 고정 코드 근거에 바탕을 둔 답변 |
-
-`/reviewbot`과 `@reviewbot` 별칭을 지원합니다. 한 문항이 있는 인라인 스레드에서는 보기 글자만 답할 수 있습니다. GitHub에서 해설을 보려면 일반 PR 댓글 대신 인라인 질문에 답글을 달아야 합니다.
-
-기준 브랜치의 `.hey.yaml`은 `exclude`, `pathInstructions`, `maxInlineComments`, `requireAnswers`를 지원합니다. GitHub 병합 SHA만으로 여러 커밋의 squash와 rebase를 구분하기 어려운 경우에는 검증된 공통 조상에서 정책을 읽습니다. GitHub와 GitLab에서 머지 전 답변을 요구하려면 열린 PR/MR에 `/hey tryagain`으로 질문을 요청합니다. `requireAnswers: true`이면 답변에 따라 head 커밋의 `codereviewbot/questions`가 pending에서 success로 바뀝니다. 실제 차단은 포지 설정에서 이 상태를 필수로 지정해야 합니다.
-
-## GitHub·GitLab 협업 알림
-
-저장소별 선택 기능이며 처음에는 꺼져 있습니다. 원하는 서비스에서 Incoming Webhook을 만들고 해당 환경 변수에 URL을 설정합니다.
+예를 들어 Slack에서 머지와 질문 준비 알림만 받으려면 감시를 멈춘 뒤 다음 명령으로 다시 연결하고 `watch`를 시작하세요.
 
 ```sh
-heybot_local connect github OWNER/REPO --publisher YOUR_GITHUB_LOGIN --notify slack
-heybot_local connect gitlab GROUP/PROJECT --publisher YOUR_GITLAB_LOGIN --notify discord
+heybot_local connect github OWNER/REPO --publisher MY_GITHUB_LOGIN --notify slack --notify-events merged,questions
 ```
 
-| `--notify` | 기본 환경 변수 | 채널 지정 |
-| --- | --- | --- |
-| `slack` | `SLACK_WEBHOOK_URL` | Slack의 웹훅 생성 화면 |
-| `mattermost` | `MATTERMOST_WEBHOOK_URL` | 웹훅 기본 채널 또는 `--notify-channel NAME` |
-| `discord` | `DISCORD_WEBHOOK_URL` | Discord의 웹훅 생성 화면 |
-| `webhook` | `HEYBOT_WEBHOOK_URL` | 별도 수신기에서 처리 |
+사람 댓글도 알리려면 이벤트에 `commented`를 추가하세요. 댓글 첫 줄을 채널에 보내지 않으려면 `--no-notify-comment-preview`를 붙입니다. 전체 이벤트와 설정 방법은 [운영 가이드](docs/operations.md#githubgitlab-협업-알림)에서 확인할 수 있습니다.
 
-`--notify-url-env NAME`으로 주소를 읽을 변수 이름을 지정할 수 있습니다. 알림을 모두 끄려면 `--notify` 없이 저장소를 다시 연결합니다.
+## 운영 정보
 
-두 포지에서 `--notify-events`에 보낼 이벤트를 쉼표로 구분해 지정할 수 있습니다. 아래 예시는 머지, 댓글, 질문 준비 알림을 보내고 댓글 미리보기를 끕니다.
+- 프로필과 SQLite 이력은 기본적으로 `~/.heybot_local`에 저장됩니다. `HEYBOT_HOME`으로 바꿀 수 있고, 감시를 다시 켜면 저장된 조회 위치부터 이어갑니다.
+- 포지 토큰, 모델 키, 웹훅 주소는 각각 환경 변수로 관리합니다. 모델에는 알려진 비밀 패턴과 제외 파일을 제거한 코드 발췌를 전달합니다. 비공개 코드의 외부 전송 기준과 팀 채널에 표시할 내용은 팀 정책에 따라 설정하세요.
+- 기준 브랜치의 `.hey.yaml`로 제외 경로, 인라인 질문 수, 선택 기능인 `requireAnswers`를 설정할 수 있습니다. [저장소 정책과 장애 복구](docs/operations.md)
+- macOS와 Linux ARM64에서 설치와 실행을 검증했습니다. Windows 네이티브와 실제 사내 GitHub Enterprise·비공개 GitLab은 추가 검증 범위입니다. [검증 결과와 재현 절차](docs/verification.md)
 
-```sh
-heybot_local connect github OWNER/REPO --publisher YOUR_GITHUB_LOGIN --notify slack \
-  --notify-events merged,commented,questions --no-notify-comment-preview
-heybot_local connect gitlab GROUP/PROJECT --publisher YOUR_GITLAB_LOGIN --notify discord \
-  --notify-events merged,commented,questions --no-notify-comment-preview
-```
-
-| 이벤트 | 알림 내용 |
-| --- | --- |
-| `opened`, `reopened`, `merged`, `closed` | PR/MR 열기, 재열기, 머지, 닫기 |
-| `commented` | 일반·리뷰 댓글 또는 디스커션의 사람 댓글 |
-| `questions` | 질문 준비 |
-| `push` | 기존 브랜치에 커밋 Push |
-| `branch-created` | 새 브랜치 생성 |
-
-두 옵션을 생략하면 기존 저장소 설정과 마찬가지로 모든 이벤트를 보내고 댓글 첫 줄을 표시합니다. `--no-notify-comment-preview`를 지정하면 댓글 알림에 작성자, PR/MR 제목과 댓글 링크가 표시됩니다. 질문 게시와 댓글 명령은 알림 설정과 독립적으로 동작합니다.
-
-같은 알림 대상으로 다시 연결해도 전송 이력과 조회 커서는 이어집니다. 이벤트 선택에서 제외된 대기 알림은 `skipped`로 표시합니다. 이벤트를 다시 선택하면 기록된 이벤트 시각이 재활성화 시각보다 늦을 때부터 전송합니다. 미리보기를 끄면 이미 대기 중인 댓글 알림에서도 미리보기를 제거합니다. 미리보기를 다시 켜면 이후 대기열에 들어오는 댓글부터 미리보기를 표시합니다.
-
-일반 웹훅은 `version`, `id`, `event`, `repository`, Markdown `text`를 JSON POST로 보냅니다. 기존 브랜치 Push와 새 브랜치 생성의 `event` 값은 모두 `push`입니다. 변경 요청 번호는 GitHub에서 `pullRequest`, GitLab에서 `mergeRequest` 필드를 사용합니다. [Slack Incoming Webhooks](https://api.slack.com/messaging/webhooks) · [Discord Webhook API](https://docs.discord.com/developers/resources/webhook)
-
-## 운영과 복구
-
-- **게시 담당 PC**를 저장소마다 한 대 지정합니다. 게시 모드의 토큰 계정은 `--publisher`와 일치해야 합니다. 다른 PC는 `connect … --observe`로 설정합니다. 한 프로필 안에서는 잠금으로 동시 실행을 막습니다. 서로 다른 PC의 게시 모드를 원격에서 잠그는 기능은 없으므로 두 PC에서 게시 모드를 켜면 중복 가능성이 있습니다.
-- 질문과 답변 이력, 대기 작업, 커서는 `HEYBOT_HOME`(기본 `~/.heybot_local`)의 SQLite와 설정 파일에 저장됩니다. 담당 PC가 바뀌면 기존 감시를 종료하고 프로필을 이관한 뒤 이전과 동일한 게시 계정으로 시작합니다.
-- 첫 조회 시각부터 이벤트를 처리합니다. 이후 절전이나 연결 장애가 생기면 저장된 커서부터 다시 조회하고 작업 ID로 중복을 제거합니다. 댓글 쓰기 응답이 사라지면 재시도 전에 원격 마커를 대조합니다. 실패 작업은 `heybot_local retry JOB_ID`로 다시 대기열에 넣을 수 있습니다. 협업 웹훅 응답이 유실되면 해당 알림은 `uncertain`으로 표시됩니다.
-- GitHub는 PR 타임라인과 저장소 활동 API를 사용합니다. Push 활동의 재조회 구간은 마지막 커서보다 15분 전까지 겹칩니다. 머지·머지 큐 활동은 PR 머지 알림으로 처리합니다. 강제 Push의 이전 SHA가 사라졌거나 비교 범위가 너무 크면 브랜치 링크와 범위 상태를 남깁니다. 저장소 활동 API가 제공되지 않는 인스턴스에서는 Push·새 브랜치 조회 오류가 감시 출력에 표시됩니다. [GitHub 타임라인](https://docs.github.com/en/rest/issues/timeline) · [GitHub 저장소 활동](https://docs.github.com/en/rest/repos/repos#list-repository-activities)
-- GitLab의 과거 MR은 배치로 순회하므로 변경 시각이 갱신되지 않는 옛 MR의 댓글은 감지까지 여러 번 폴링이 걸릴 수 있습니다. 재열기 이력이 없는 GitLab 인스턴스에서는 두 폴링 사이에 일어난 연속 상태 전이가 누락될 수 있습니다. Push 보존 기간을 넘겼거나 GitLab bulk 이벤트가 브랜치·SHA를 생략하면 전체 Push를 복원할 수 없습니다. 확인할 수 없는 범위는 알림 큐에 표시됩니다.
-
-## 검증
-
-`npm test`는 격리 HTTP·Git 서버와 모델 응답으로 양쪽 포지의 CLI 흐름을 검증합니다. 실제 연동 결과는 아래 표에 함께 기록합니다.
-
-| 항목 | 검증 범위 |
-| --- | --- |
-| 설치 패키지 | `npm pack`으로 만든 tarball을 깨끗한 npm 디렉터리에 설치. v0.3.0에서 macOS(Node 26.0.0)와 Linux ARM64(Node 22.13.0) 각각 전체 테스트 138개와 설치된 CLI 테스트 27개 통과 |
-| 폴링과 복구 | 두 댓글 표면, 페이지네이션과 429 후 재개, 응답 유실 후 마커 대조, SQLite 이력, 전용 게시자와 관찰자 |
-| 모델 | 공식 Codex CLI 0.169.0과 ChatGPT 로그인으로 한국어 질문 생성과 근거 채점 확인. Claude API 구조화 출력 및 Ollama 출제·채점은 격리 응답으로 검증. 실행 중인 Ollama와 테스트용 Claude API 키가 없어 두 모델의 실제 호출은 미검증 |
-| GitHub | 사용자 승인 테스트 저장소에서 설치 패키지로 검증. PR #1의 실제 머지, 요약 1개와 인라인 질문 2개, 같은 계정의 복수 답변과 근거 채점, 문항별 인라인 해설. PR #2에서 `requireAnswers`의 pending→success와 닫힌 PR의 도움말 확인. [머지 PR](https://github.com/thisis-joe/heybot_local/pull/1) · [채점](https://github.com/thisis-joe/heybot_local/pull/1#issuecomment-7186399720) · [스레드 해설](https://github.com/thisis-joe/heybot_local/pull/1#discussion_r4705494257) · [답변 상태 PR](https://github.com/thisis-joe/heybot_local/pull/2) |
-| GitLab | 격리된 MR·디스커션·커밋 상태와 알림 테스트. 공개 GitLab 프로젝트에서 목록 및 Push 이벤트 응답 확인. 사용자 인증이 필요한 실제 GitLab MR 게시·상태는 미검증 |
-| 협업 알림 | 두 포지에서 변경 요청·댓글·질문·Push·새 브랜치와 네 웹훅 전송 형식을 격리 검증했습니다. 실제 GitHub 저장소의 재열기·닫기·댓글·브랜치 생성·Push 5건도 로컬 수신기에서 확인했습니다. 재조회 시 추가 전송은 0건이었습니다. [테스트 댓글](https://github.com/thisis-joe/heybot_local/pull/2#issuecomment-7186672328) · [테스트 브랜치](https://github.com/thisis-joe/heybot_local/tree/verify/heybot-local-notifications) |
-| 알림 제어 | GitHub·GitLab 격리 CLI에서 이벤트 선택, 재활성화와 중복 방지, 댓글 미리보기의 대기열 제거, 질문 게시와 댓글 명령을 확인했습니다. |
-
-실연동은 공개 `heybot_local` 저장소의 테스트 브랜치와 합성 코드에 한정했습니다. `doctor`에서도 이 저장소에 대한 실제 인증, 읽기, 권한 메타데이터와 Codex 로그인 조회를 확인했습니다.
-
-### 운영체제·사내 포지 검증 (2026-11-26)
-
-| 대상 | 확인 결과 |
-| --- | --- |
-| Linux ARM64 (Debian 12) | Node 22.13.0, npm 10.9.2, Git 2.39.5. 공백·한글이 있는 소스와 설치 경로에서 `npm ci`, v0.3.0 전체 테스트 138개, `npm pack`, 임시 설치 경로의 CLI 테스트 27개를 통과했습니다. Git에서 받은 공백·한글 파일명이 모델 입력에 포함되는 것도 확인했습니다. |
-| Linux 감시 종료 | 포그라운드 감시가 첫 조회를 저장하면 두 번째 감시가 SQLite 잠금으로 거부됩니다. `SIGINT`와 `SIGTERM`에서 종료 코드 0, `status`의 `watching: false`, 이후 `watch --once` 재실행을 확인했습니다. |
-| Windows | 네이티브 실행이 남아 있습니다. 아래 절차에서 Git for Windows, npm `.cmd` 실행, 공백·한글 경로, 설치된 CLI 통합 테스트와 콘솔 `Ctrl+C` 종료를 확인할 수 있습니다. [Node 자식 프로세스](https://nodejs.org/download/release/v22.13.0/docs/api/child_process.html#spawning-bat-and-cmd-files-on-windows) · [Node 신호 처리](https://nodejs.org/download/release/v22.13.0/docs/api/process.html#signal-events) |
-| GitHub Enterprise·비공개 GitLab | 루프백 fixture에서 GHES `/api/v3`, GitLab `/gitlab/api/v4`와 중첩 프로젝트의 인코딩, 토큰과 계정 확인, 잘못된 토큰과 게시 계정 거부, 인증된 Git fetch(HTTP 객체 서빙)를 확인했습니다. GHE.com은 API 호스트에서 웹·Git 호스트를 계산하는 테스트를 통과했습니다. 승인된 실제 사내 포지에서 연결·읽기·게시 권한 확인이 남아 있습니다. [GitLab 경로 인코딩](https://docs.gitlab.com/api/rest/#namespaced-paths) |
-| 사내 CA | 합성 CA를 사용하는 로컬 HTTPS GHES fixture에서 CA 설정 전 REST 실패와 설정 후 REST·Git fetch 성공을 확인했습니다. 실제 사내 CA 및 Git for Windows에서의 TLS 연동 확인이 남아 있습니다. |
-
-#### Linux 재현
-
-Node.js와 Git, OpenSSL이 있는 Linux에서 저장소 루트를 공백·한글이 포함된 경로에 두고 실행합니다. 위 검증에는 `node:22.13.0-bookworm`을 사용했습니다. `HEYBOT_TEST_TLS=1`은 루프백 HTTPS 테스트를 켭니다.
-
-```sh
-npm ci
-HEYBOT_TEST_TLS=1 npm test
-npm pack
-scratch="$(mktemp -d)"
-prefix="$scratch/HeyBot 검증"
-npm install -g --prefix "$prefix" ./heybot_local-0.3.0.tgz
-"$prefix/bin/heybot_local" --help
-HEYBOT_TEST_TLS=1 HEYBOT_PACKED_BIN="$prefix/bin/heybot_local" node --test test/local-flow.test.mjs
-rm -rf -- "$scratch"
-```
-
-#### Windows 재현
-
-Node.js와 Git for Windows가 있는 PowerShell에서 저장소 루트를 공백·한글이 포함된 경로에 두고 실행합니다.
-
-```powershell
-npm.cmd ci
-npm.cmd test
-npm.cmd pack
-$prefix = Join-Path ([IO.Path]::GetTempPath()) ("HeyBot 검증 " + [guid]::NewGuid())
-npm.cmd install -g --prefix $prefix .\heybot_local-0.3.0.tgz
-$bin = Join-Path $prefix 'heybot_local.cmd'
-& $bin --help
-$env:HEYBOT_PACKED_CLI = Join-Path $prefix 'node_modules\heybot_local\dist\cli.js'
-node --test .\test\local-flow.test.mjs
-Remove-Item Env:HEYBOT_PACKED_CLI
-```
-
-Windows 콘솔 종료를 확인하려면 별도 PowerShell 창에서 다음 로컬 응답기를 실행합니다.
-
-```powershell
-@'
-require('node:http').createServer((req, res) => {
-  const value = req.url === '/user' ? { login: 'fixture' } : req.url.includes('?') ? [] : { id: 1 };
-  res.setHeader('Content-Type', 'application/json');
-  res.end(JSON.stringify(value));
-}).listen(19735, '127.0.0.1');
-'@ | node -
-```
-
-설치한 창에서 관찰 모드로 감시를 시작합니다.
-
-```powershell
-$env:HEYBOT_HOME = Join-Path $prefix 'watch-profile'
-$env:HEYBOT_TEST_TOKEN = 'fixture'
-Write-Output $env:HEYBOT_HOME
-Write-Output $bin
-& $bin connect github fixture/repo --publisher fixture --observe --token-env HEYBOT_TEST_TOKEN --instance http://127.0.0.1:19735
-& $bin watch --interval 3600
-```
-
-다른 PowerShell 창에서 출력된 `HEYBOT_HOME`을 설정하고 같은 `heybot_local.cmd`의 `status`에서 `watching: true`와 조회 커서 1개를 확인합니다. 감시 창에서 `Ctrl+C`를 누른 뒤 그 창에서 아래 명령을 실행합니다. `watching: false`와 `watch --once` 성공을 확인합니다. 검증을 마치면 로컬 응답기도 `Ctrl+C`로 종료하고 임시 설치 경로를 삭제합니다.
-
-```powershell
-& $bin status
-& $bin watch --once
-$LASTEXITCODE
-```
-
-## 범용 배포에서 확인할 항목
-
-| 항목 | 현재 지원 범위와 남은 확인 |
-| --- | --- |
-| 운영체제와 포지 | Windows 네이티브 설치·종료와 GitHub Enterprise·비공개 GitLab·사내 CA 실연동이 남아 있습니다. 사내 포지 읽기는 승인된 저장소에서 `connect … --observe`와 `watch --once`로 확인할 수 있습니다. |
-| 최초 설정 | `doctor`로 토큰·저장소 읽기와 권한 메타데이터, 모델·웹훅 설정을 점검할 수 있습니다. 댓글·커밋 상태 쓰기와 웹훅 수신은 실제 작업에서 확인합니다. |
-| 모델 인증 | Codex ChatGPT 로그인, Claude API 키, 로컬 Ollama를 설정할 수 있습니다. Claude 구독과 Ollama·Claude 유료 API의 실제 실행 범위는 검증 표를 참고합니다. |
-| 알림 관리 | 저장소마다 알림 대상 한 곳, 이벤트 종류와 댓글 미리보기 표시 여부를 설정할 수 있습니다. 실제 협업 채널에서 설정 전환과 수신을 확인할 항목이 남아 있습니다. |
-| 계속 실행과 인계 | 지정 PC가 꺼져 있는 동안엔 게시가 멈추고 재시작 시 커서에서 복구합니다. 다른 PC에 맡길 때는 프로필과 게시 계정 이관이 필요합니다. |
-
-
-[기능 대조표와 원본 기준 커밋](docs/specs/heybot-local.md) · [구현 순서](docs/plans/heybot-local.md)
-
-MIT. `codereviewbot`에서 가져온 코드 및 테스트의 원본 저작권 표기를 [LICENSE](LICENSE)에 보존했습니다.
+[기능 대조표와 원본 기준 커밋](docs/specs/heybot-local.md) · [개발 순서](docs/plans/heybot-local.md) · [MIT 라이선스와 원본 저작권](LICENSE)
