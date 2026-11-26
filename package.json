@@ -1,13 +1,21 @@
 {
   "name": "heybot_local",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "GitHub과 GitLab을 위한 로컬 학습 질문 봇",
   "private": true,
   "type": "module",
   "license": "MIT",
-  "engines": { "node": "^22.13.0 || >=24.0.0" },
-  "bin": { "heybot_local": "dist/cli.js" },
-  "files": ["dist", "docs/specs/heybot-local.md", "docs/plans/heybot-local.md"],
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  },
+  "bin": {
+    "heybot_local": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "docs/specs/heybot-local.md",
+    "docs/plans/heybot-local.md"
+  ],
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
     "test": "npm run build && node --test test/*.test.mjs",
