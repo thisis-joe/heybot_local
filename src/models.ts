@@ -27,6 +27,50 @@ export async function checkCodexLogin(): Promise<void> {
     throw new ModelFailure({ provider: 'codex', code: 'authentication' });
 }
 
+const claudeApi = 'https://api.anthropic.com/v1';
+type ClaudeConfig = Extract<ModelConfig, { provider: 'claude' }>;
+type OllamaConfig = Extract<ModelConfig, { provider: 'ollama' }>;
+
+function claudeHeaders(config: ClaudeConfig): Record<string, string> {
+  try { return { 'x-api-key': credential(config.keyEnv), 'anthropic-version': '2023-06-01' }; }
+  catch { throw new ModelFailure({ code: 'authentication', provider: 'claude' }); }
+}
+
+export async function checkClaudeModel(config: ClaudeConfig, endpoint = claudeApi): Promise<void> {
+  if (config.model === '.' || config.model === '..')
+    throw new ModelFailure({ code: 'model_unavailable', provider: 'claude' });
+  const response = await fetch(`${endpoint}/models/${encodeURIComponent(config.model)}`, {
+    headers: claudeHeaders(config), redirect: 'error', signal: AbortSignal.timeout(10000),
+  });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new ModelFailure({ provider: 'claude', apiStatus: response.status, code: response.status === 429 ? 'rate_limit'
+      : [401, 403].includes(response.status) ? 'authentication' : response.status === 404 ? 'model_unavailable' : 'unavailable' });
+  }
+  const model = JSON.parse(await boundedText(response, 512000));
+  if (model?.type !== 'model' || typeof model.id !== 'string' || !model.id)
+    throw new ModelFailure({ code: 'invalid_output', provider: 'claude' });
+}
+
+export async function checkOllamaModel(config: OllamaConfig): Promise<string> {
+  const url = trustedUrl(config.url, true);
+  // Ollama accepts hosted model names as well. Limit this provider to installed local model blobs.
+  if (/(?:[-:]cloud)(?:$|:)/i.test(config.model))
+    throw new ModelFailure({ code: 'model_unavailable', provider: 'ollama' });
+  const tags = await fetch(`${url}/api/tags`, { redirect: 'error', signal: AbortSignal.timeout(10000) });
+  if (!tags.ok) {
+    await tags.body?.cancel();
+    throw new ModelFailure({ code: 'unavailable', provider: 'ollama', apiStatus: tags.status });
+  }
+  const models = JSON.parse(await boundedText(tags, 512000))?.models;
+  const name = config.model.split('/').at(-1)?.includes(':') ? config.model : `${config.model}:latest`;
+  if (!Array.isArray(models) || !models.some(entry => (entry?.name === name || entry?.model === name)
+    && typeof entry.digest === 'string' && /^[a-f0-9]{64}$/i.test(entry.digest) && entry.size > 0 && !entry.remote_host)) {
+    throw new ModelFailure({ code: 'model_unavailable', provider: 'ollama' });
+  }
+  return url;
+}
+
 function outputSchema(phase: ModelPhase) {
   const { $schema: _meta, ...schema } = z.toJSONSchema(phaseSchemas[phase], { unrepresentable: 'any' });
   return schema;
@@ -86,23 +130,9 @@ async function httpModel(
   const schema = outputSchema(phase);
   const messages = [{ role: 'user', content: prompt }];
   const isClaude = config.provider === 'claude';
-  const headers: Record<string, string> = { 'content-type': 'application/json' };
-  if (isClaude) {
-    try { headers['x-api-key'] = credential(config.keyEnv); }
-    catch { throw new ModelFailure({ code: 'authentication', provider: 'claude' }); }
-    headers['anthropic-version'] = '2023-06-01';
-  } else {
-    // Ollama accepts hosted model names as well. Limit this provider to installed local model blobs.
-    if (/(?:[-:]cloud)(?:$|:)/i.test(config.model))
-      throw new ModelFailure({ code: 'model_unavailable', provider: 'ollama' });
-    const tags = await fetch(`${trustedUrl(config.url, true)}/api/tags`, { redirect: 'error', signal: AbortSignal.timeout(10000) });
-    if (!tags.ok) throw new ModelFailure({ code: 'unavailable', provider: 'ollama' });
-    const models = JSON.parse(await boundedText(tags, 512000)).models;
-    const name = config.model.split('/').at(-1)?.includes(':') ? config.model : `${config.model}:latest`;
-    if (!Array.isArray(models) || !models.some(entry => (entry.name === name || entry.model === name) && /^[a-f0-9]{64}$/i.test(entry.digest ?? '') && entry.size > 0 && !entry.remote_host))
-      throw new ModelFailure({ code: 'model_unavailable', provider: 'ollama' });
-  }
-  const response = await fetch(isClaude ? claudeEndpoint : `${trustedUrl(config.url, true)}/api/chat`, {
+  const headers = { 'content-type': 'application/json', ...(isClaude ? claudeHeaders(config) : {}) };
+  const endpoint = isClaude ? claudeEndpoint : `${await checkOllamaModel(config)}/api/chat`;
+  const response = await fetch(endpoint, {
     method: 'POST', redirect: 'error', signal: AbortSignal.timeout(timeoutMs), headers,
     body: JSON.stringify(isClaude
       ? { model: config.model, messages, max_tokens: 8192, output_config: { format: { type: 'json_schema', schema: claudeSchema(schema) } } }
@@ -129,7 +159,7 @@ function scrubOutput(value: unknown): unknown {
   return value;
 }
 
-export function createModel(config: ModelConfig, claudeEndpoint = 'https://api.anthropic.com/v1/messages'): Model {
+export function createModel(config: ModelConfig, claudeEndpoint = `${claudeApi}/messages`): Model {
   return {
     async run(phase, prompt, _id, timeoutMs = 120000) {
       try {

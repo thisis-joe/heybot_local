@@ -18,6 +18,7 @@ heybot_local model codex
 # GitHub CLI에 로그인한 계정의 토큰을 쓰는 예시입니다.
 export GITHUB_TOKEN="$(gh auth token)"
 heybot_local connect github OWNER/REPO --publisher YOUR_GITHUB_LOGIN
+heybot_local doctor
 heybot_local watch
 ```
 
@@ -30,6 +31,16 @@ GitLab은 `GITLAB_TOKEN`을 설정하고 `heybot_local connect gitlab GROUP/PROJ
 | 댓글 사용자 | GitHub Write 또는 그 이상, GitLab Developer 또는 그 이상 |
 
 `heybot_local status`는 감시 여부, 커서, 작업과 알림 상태, 실패 사유를 표시합니다. 기본 폴링 간격은 60초이며 `watch --interval 30`으로 변경할 수 있습니다. `watch --once`는 한 번 조회하고 실행 가능한 대기 작업을 처리합니다. `Ctrl+C`로 종료할 수 있습니다. 저장소나 모델 설정을 변경했다면 감시를 재시작합니다.
+
+## 설정 진단
+
+`heybot_local doctor`는 현재 프로필의 저장소 연결과 모델을 검사합니다. 각 연결에서 토큰 인증, 게시 계정 일치 여부, 저장소 메타데이터·커밋 목록·PR/MR 목록의 API 읽기를 확인합니다. 진단은 토큰 값, API 키, 웹훅 URL과 포지 응답 본문을 표시하지 않습니다.
+
+- **`[확인]`**은 해당 조회나 설정 검사를 통과했다는 뜻입니다. 모델은 Codex CLI의 ChatGPT 로그인, Claude Models API의 키·모델 조회, Ollama의 로컬 모델 설치 여부를 확인합니다. 웹훅은 게시 연결에 설정된 주소의 형식만 검사합니다.
+- **`[메타데이터]`**는 쓰기와 관련된 권한 정보를 조회했다는 뜻입니다. GitHub는 OAuth 범위와 저장소 푸시 권한을, GitLab은 토큰의 `api` 범위와 프로젝트 역할을 사용합니다. `[확인 필요]`는 GitHub fine-grained 토큰처럼 권한 정보가 충분하지 않거나 조회할 수 없는 경우에 표시됩니다. 실제 댓글·커밋 상태 쓰기, 웹훅 수신, 모델 생성은 별도로 확인해야 합니다. 커밋 상태 쓰기는 `requireAnswers`를 사용할 때 필요합니다. [GitHub OAuth 범위](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps) · [GitLab 역할과 권한](https://docs.gitlab.com/user/permissions/)
+- **`[실패]`**가 있으면 종료 코드는 `1`입니다. 메타데이터 부족으로 `[확인 필요]`만 남아 있으면 종료 코드는 `0`입니다. 관찰 모드에서는 게시 계정 일치, 쓰기 권한과 웹훅 검사를 건너뜁니다.
+
+진단 중에는 포지와 모델 설정을 조회합니다. 댓글 게시, 커밋 상태 갱신, 웹훅 발송, 모델 생성 요청은 수행하지 않습니다.
 
 ## 모델
 
@@ -106,7 +117,7 @@ heybot_local connect gitlab GROUP/PROJECT --publisher YOUR_GITLAB_LOGIN --notify
 | 항목 | 현재 지원 범위와 남은 확인 |
 | --- | --- |
 | 운영체제와 포지 | macOS에서 Node 22·26과 GitHub.com을 실검증했습니다. Linux·Windows의 설치·종료 동작, 비공개 GitLab, GitHub Enterprise 및 사내 CA 환경의 실연동 결과가 필요합니다. |
-| 최초 설정 | `connect`가 토큰 사용자와 저장소 읽기를 확인합니다. 댓글·커밋 상태 쓰기 권한과 웹훅 수신 여부는 실제 작업에서 확인됩니다. |
+| 최초 설정 | `doctor`로 토큰·저장소 읽기와 권한 메타데이터, 모델·웹훅 설정을 점검할 수 있습니다. 댓글·커밋 상태 쓰기와 웹훅 수신은 실제 작업에서 확인합니다. |
 | 모델 인증 | Codex ChatGPT 로그인, Claude API 키, 로컬 Ollama를 설정할 수 있습니다. Claude 구독과 Ollama·Claude 유료 API의 실제 실행 범위는 검증 표를 참고합니다. |
 | 알림 관리 | 저장소마다 채널 한 곳을 지정합니다. 이벤트별 선택, 댓글 미리보기 끄기, 여러 채널로 분배는 범용 배포 시 추가할 선택지입니다. |
 | 계속 실행과 인계 | 지정 PC가 꺼져 있는 동안엔 게시가 멈추고 재시작 시 커서에서 복구합니다. 다른 PC에 맡길 때는 프로필과 게시 계정 이관이 필요합니다. |

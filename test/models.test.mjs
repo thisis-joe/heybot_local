@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import test from 'node:test';
-import { createModel } from '../dist/models.js';
+import { checkClaudeModel, createModel } from '../dist/models.js';
 import { initialQuestions } from './fixtures.mjs';
 
 const grade = {
@@ -24,6 +24,27 @@ async function endpoint(t, handle) {
   t.after(() => server.close());
   return `http://127.0.0.1:${server.address().port}`;
 }
+
+test('Claude model diagnosis uses the read-only Models API and authenticates the configured key', async t => {
+  const keyEnv = 'HEYBOT_FIXTURE_DOCTOR_CLAUDE_KEY';
+  process.env[keyEnv] = 'model-fixture-secret';
+  t.after(() => delete process.env[keyEnv]);
+  let status = 200;
+  const url = await endpoint(t, (req, body) => {
+    assert.equal(req.method, 'GET');
+    assert.equal(req.url, '/v1/models/chosen-claude-model');
+    assert.equal(req.headers['x-api-key'], process.env[keyEnv]);
+    assert.equal(req.headers['anthropic-version'], '2023-06-01');
+    assert.equal(body, null);
+    return { status, value: status === 200 ? { type: 'model', id: 'resolved-model' } : { message: process.env[keyEnv] } };
+  });
+  const config = { provider: 'claude', model: 'chosen-claude-model', keyEnv };
+  await checkClaudeModel(config, `${url}/v1`);
+  status = 401;
+  await assert.rejects(checkClaudeModel(config, `${url}/v1`), {
+    failure: { provider: 'claude', code: 'authentication', apiStatus: 401 },
+  });
+});
 
 test('Claude API key is scoped to Messages, grammar uses its supported subset and Zod checks complete output', async t => {
   const keyEnv = 'HEYBOT_FIXTURE_CLAUDE_KEY';

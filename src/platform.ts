@@ -56,10 +56,14 @@ export class Platform {
     return `${this.config.instance}/${this.config.repository.split('/').map(encodeURIComponent).join('/')}/-/merge_requests/${number}#note_${id}`;
   }
   async identity(): Promise<string> {
-    const response = await this.api.request('/user');
-    const username = this.config.platform === 'github' ? response.login : response.username;
+    return (await this.account()).login;
+  }
+  async account(): Promise<{ login: string; id?: number; oauthScopes: string | null }> {
+    const { data, headers } = await this.api.readWithHeaders('/user');
+    const username = this.config.platform === 'github' ? data?.login : data?.username;
     if (typeof username !== 'string' || !username) throw new Error('인증 계정 확인 실패');
-    return username;
+    return { login: username, id: Number.isSafeInteger(data.id) && data.id > 0 ? data.id : undefined,
+      oauthScopes: headers.get('x-oauth-scopes') };
   }
   owned(c: RemoteComment): boolean { return sameLogin(c.author, this.config.botLogin) && hasOutputMarker(c.body); }
   async comment(number: number, body: string, id?: string): Promise<unknown> {
