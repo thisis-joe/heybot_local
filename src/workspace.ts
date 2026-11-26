@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile, mkdtemp, rm, readdir, lstat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { devNull, tmpdir } from 'node:os';
 import { execute } from './process.js';
 import { safePath, Sha, type Snapshot } from './contracts.js';
 import { globMatch, readPolicy, policyVersion, type Policy } from './policy.js';
@@ -23,10 +23,16 @@ export function selectDiffEntries(canonical: string, incremental: string | null,
   return diffEntries(canonical).filter(e => !blocked(e.path, excludes) && !blocked(e.oldPath, excludes) && (!selected || selected.has(e.path) || selected.has(e.oldPath)));
 }
 function gitEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  return { PATH: process.env.PATH, HOME: '/nonexistent', LANG: 'C.UTF-8', GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_LITERAL_PATHSPECS: '1', ...extra };
+  return {
+    PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
+    TEMP: process.env.TEMP, TMP: process.env.TMP,
+    HOME: '/nonexistent', LANG: 'C.UTF-8',
+    GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: devNull, GIT_LITERAL_PATHSPECS: '1',
+    GIT_SSL_CAINFO: process.env.GIT_SSL_CAINFO, ...extra,
+  };
 }
 async function git(repo: string, args: string[], extra: NodeJS.ProcessEnv = {}, allowFailure = false): Promise<Buffer> {
-  return (await execute('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.quotePath=false', '-C', repo, ...args], { env: gitEnv(extra), allowFailure, timeoutMs: 120000, maxBytes: 24 * 1024 * 1024 })).stdout;
+  return (await execute('git', ['-c', `core.hooksPath=${devNull}`, '-c', 'core.fsmonitor=false', '-c', 'core.quotePath=false', '-C', repo, ...args], { env: gitEnv(extra), allowFailure, timeoutMs: 120000, maxBytes: 24 * 1024 * 1024 })).stdout;
 }
 export async function exportSnapshot(repo: string, sha: string, out: string, priority: string[], excludes: string[] = [], denied: string[] = []): Promise<{ files: Record<string, string>; excluded: string[]; limited: boolean }> {
   Sha.parse(sha); await mkdir(out, { recursive: true, mode: 0o700 });

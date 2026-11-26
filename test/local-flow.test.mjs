@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
-import { execFile as execFileCallback } from 'node:child_process';
+import { execFile as execFileCallback, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { tmpdir } from 'node:os';
+import { createServer as createSecureServer } from 'node:https';
+import { devNull, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { initialQuestions, answerKey } from './fixtures.mjs';
 import { repositoryWebBase } from '../dist/config.js';
@@ -17,7 +19,7 @@ const execFile = promisify(execFileCallback);
 async function makeGitFixture(dir, gitlab = false) {
   const repo = join(dir, 'fixture');
   await mkdir(join(repo, 'src'), { recursive: true });
-  const git = async (...args) => (await execFile('git', ['-C', repo, '-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', ...args])).stdout.trim();
+  const git = async (...args) => (await execFile('git', ['-C', repo, '-c', `core.hooksPath=${devNull}`, '-c', 'core.autocrlf=false', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', ...args])).stdout.trim();
   await git('init', '-b', 'main');
   await writeFile(join(repo, 'src/pay.ts'), 'function pay() {\n  save();\n}\n');
   await writeFile(join(repo, '.hey.yaml'), 'requireAnswers: true\nexclude: ["**/*.private"]\n');
@@ -25,6 +27,7 @@ async function makeGitFixture(dir, gitlab = false) {
   await git('commit', '-m', 'base');
   const base = await git('rev-parse', 'HEAD');
   await writeFile(join(repo, 'src/pay.ts'), 'function pay() {\n  charge();\n  save();\n}\n');
+  await writeFile(join(repo, 'src', '결제 규칙.ts'), 'const paymentRule = true;\n');
   await writeFile(join(repo, '.env'), 'SHOULD_NEVER_REACH_MODEL=yes');
   await writeFile(join(repo, '.hey.yaml'), 'requireAnswers: false\n');
   await writeFile(join(repo, 'fixture.private'), 'BASE_POLICY_MUST_EXCLUDE_ME=yes');
@@ -36,18 +39,30 @@ async function makeGitFixture(dir, gitlab = false) {
   return { base, head, objects: join(repo, '.git') };
 }
 const safeToken = 'fixture-forge-token';
-const defaultCommand = process.env.HEYBOT_PACKED_BIN ? [process.env.HEYBOT_PACKED_BIN] : [process.execPath, new URL('../dist/cli.js', import.meta.url).pathname];
-export async function localFixture(t, kind, command = defaultCommand) {
-  const gitlab = kind === 'gitlab';
-  const dir = await mkdtemp(join(tmpdir(), 'heybot-http-'));
+const defaultCommand = process.env.HEYBOT_PACKED_BIN
+  ? [process.env.HEYBOT_PACKED_BIN]
+  : [process.execPath, process.env.HEYBOT_PACKED_CLI ?? fileURLToPath(new URL('../dist/cli.js', import.meta.url))];
+export async function localFixture(t, kind, command = defaultCommand, tls = false) {
+  const gitlab = kind.startsWith('gitlab');
+  const prefix = kind === 'gitlab-private' ? '/gitlab' : '';
+  const apiPrefix = gitlab ? `${prefix}/api/v4` : kind === 'github-enterprise' ? '/api/v3' : '';
+  const repository = prefix ? 'owner/unit/repo' : 'owner/repo';
+  const webPath = `${prefix}/${repository}`;
+  const gitPath = `${webPath}.git/`;
+  const root = `${apiPrefix}${gitlab ? `/projects/${encodeURIComponent(repository)}` : `/repos/${repository}`}`;
+  const dir = await mkdtemp(join(tmpdir(), 'heybot 호환성-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const { base, head, objects } = await makeGitFixture(dir, gitlab);
+  const cert = join(dir, 'fixture-ca.pem'), key = join(dir, 'fixture-key.pem');
+  if (tls) await execFile('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+    '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1', '-keyout', key, '-out', cert]);
   let nextNote = 1;
-  const general = [], review = [], modelCalls = [], statuses = [], requests = [], notices = [], transitions = [], pushes = [];
+  const general = [], review = [], modelCalls = [], statuses = [], requests = [], gitRequests = [], notices = [], transitions = [], pushes = [];
   const access = { login: 'owner', githubScopes: 'repo', githubPush: true, gitlabScopes: ['api'], gitlabRole: 30, commitsStatus: 200 };
   let updated = '2025-01-01T00:00:00.000Z', created = updated, merged = null, state = gitlab ? 'opened' : 'open', lost = false, lostNotification = false, limited = false, activityUnavailable = false;
   let stateEventsUnavailable = false, hideChange = false;
-  const server = createServer(async (req, res) => {
+  const server = tls ? createSecureServer({ key: await readFile(key), cert: await readFile(cert) }) : createServer();
+  server.on('request', async (req, res) => {
     try {
       const url = new URL(req.url, origin);
       const path = url.pathname;
@@ -55,8 +70,12 @@ export async function localFixture(t, kind, command = defaultCommand) {
       for await (const chunk of req) input += chunk;
       const body = input ? JSON.parse(input) : undefined;
       const json = (value, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); };
-      if (path.startsWith('/owner/repo.git/')) {
-        const name = path.slice('/owner/repo.git/'.length);
+      if (path.startsWith(gitPath)) {
+        const basic = Buffer.from(`${gitlab ? 'oauth2' : 'x-access-token'}:${safeToken}`).toString('base64');
+        if (req.headers.authorization !== `Basic ${basic}`) return json({ message: 'Git authentication required' }, 401);
+        assert.equal(req.headers['private-token'], undefined);
+        gitRequests.push(path);
+        const name = path.slice(gitPath.length);
         assert.match(name, /^(?:HEAD|info\/refs|objects\/[a-z0-9/.-]+)$/);
         try { const value = await readFile(join(objects, name)); res.writeHead(200); res.end(value); } catch { res.writeHead(404); res.end(); }
         return;
@@ -75,6 +94,8 @@ export async function localFixture(t, kind, command = defaultCommand) {
         assert.doesNotMatch(body.messages[0].content, /SHOULD_NEVER_REACH_MODEL|BASE_POLICY_MUST_EXCLUDE_ME|fixture-forge-token/);
         return json({ done: true, message: { content: JSON.stringify({ questions: initialQuestions() }) } });
       }
+      assert.equal(req.headers[gitlab ? 'authorization' : 'private-token'], undefined);
+      if (!gitlab) assert.equal(req.headers['x-github-api-version'], '2022-11-28');
       requests.push([req.method, path, Number(url.searchParams.get('page') || 1), url.searchParams.get('after')]);
       if ((gitlab ? req.headers['private-token'] : req.headers.authorization) !== (gitlab ? safeToken : `Bearer ${safeToken}`)) {
         return json({ message: `Rejected credentials: ${req.headers['private-token'] ?? req.headers.authorization}` }, 401);
@@ -82,20 +103,19 @@ export async function localFixture(t, kind, command = defaultCommand) {
       const page = Number(url.searchParams.get('page') || 1), per = Number(url.searchParams.get('per_page') ?? 100);
       const paginated = rows => json(rows.slice((page - 1) * per, page * per));
       const pull = { number: 1, iid: 1, state, created_at: created, updated_at: updated, merged_at: merged, title: '결제', body: '결제 변경', description: '결제 변경',
-        head: { sha: head }, base: { sha: base }, merged: Boolean(merged), merge_commit_sha: head, html_url: `${origin}/owner/repo/pull/1`, web_url: `${origin}/owner/repo/-/merge_requests/1`,
+        head: { sha: head }, base: { sha: base }, merged: Boolean(merged), merge_commit_sha: head, html_url: `${origin}${webPath}/pull/1`, web_url: `${origin}${webPath}/-/merge_requests/1`,
         diff_refs: { head_sha: head, base_sha: base, start_sha: base }, user: { login: 'owner' }, author: { username: 'owner', name: 'Owner' } };
-      if (path === '/user' || path === '/api/v4/user') {
+      if (path === `${apiPrefix}/user`) {
         if (!gitlab && access.githubScopes !== null) res.setHeader('x-oauth-scopes', access.githubScopes);
         res.setHeader('x-accepted-github-permissions', 'pull_requests=write, commit_statuses=write');
         return json({ login: access.login, username: access.login, id: 3 });
       }
-      if (path === '/api/v4/users') return json([{ id: 3, username: 'owner' }]);
-      if (path === '/api/v4/personal_access_tokens/self') return access.gitlabScopes
+      if (path === `${apiPrefix}/users`) return json([{ id: 3, username: 'owner' }]);
+      if (path === `${apiPrefix}/personal_access_tokens/self`) return access.gitlabScopes
         ? json({ scopes: access.gitlabScopes }) : json({ message: 'Metadata endpoint unavailable' }, 404);
-      const root = gitlab ? '/api/v4/projects/owner%2Frepo' : '/repos/owner/repo';
       if (!path.startsWith(root)) return json({ message: 'not found' }, 404);
       const route = path.slice(root.length);
-      if (!route) return json({ id: 1, private: true, visibility: 'private', permissions: { push: access.githubPush }, web_url: `${origin}/owner/repo` });
+      if (!route) return json({ id: 1, private: true, visibility: 'private', permissions: { push: access.githubPush }, web_url: `${origin}${webPath}` });
       if (route === (gitlab ? '/repository/commits' : '/commits')) {
         return access.commitsStatus === 200 ? json([{ [gitlab ? 'id' : 'sha']: head }]) : json({ message: safeToken }, access.commitsStatus);
       }
@@ -178,17 +198,18 @@ export async function localFixture(t, kind, command = defaultCommand) {
   });
   await once(server.listen(0, '127.0.0.1'), 'listening');
   t.after(() => server.close());
-  const origin = `http://127.0.0.1:${server.address().port}`;
+  const origin = `${tls ? 'https' : 'http'}://127.0.0.1:${server.address().port}`;
+  const instance = `${origin}${gitlab ? prefix : apiPrefix}`;
   const add = (surface, body, parent = null, author = 'owner', discussion) => {
     const now = new Date().toISOString(), id = gitlab ? nextNote++ : surface.length + 1;
     const row = { id, body, created_at: now, updated_at: now, user: { login: author, type: 'User' }, author: { username: author, name: author },
-      issue_url: `${origin}/repos/owner/repo/issues/1`, pull_request_url: `${origin}/repos/owner/repo/pulls/1`,
-      html_url: `${origin}/owner/repo/pull/1#comment-${id}`, in_reply_to_id: parent, discussion_id: discussion };
+      issue_url: `${origin}${root}/issues/1`, pull_request_url: `${origin}${root}/pulls/1`,
+      html_url: gitlab ? undefined : `${origin}${webPath}/pull/1#comment-${id}`, in_reply_to_id: parent, discussion_id: discussion };
     surface.push(row);
     return row;
   };
   const env = { ...process.env, HEYBOT_HOME: join(dir, 'profile'), GITHUB_TOKEN: safeToken, GITLAB_TOKEN: safeToken,
-    FIXTURE_WEBHOOK: `${origin}/hooks/fixture` };
+    FIXTURE_WEBHOOK: `${origin}/hooks/fixture`, ...(tls ? { NODE_EXTRA_CA_CERTS: cert, GIT_SSL_CAINFO: cert } : {}) };
   const cliWith = (overrides = {}) => async (...args) => execFile(command[0], [...command.slice(1), ...args], { env: { ...env, ...overrides }, timeout: 25000 });
   const cli = cliWith();
   const transition = status => {
@@ -196,7 +217,8 @@ export async function localFixture(t, kind, command = defaultCommand) {
     transitions.push({ id: transitions.length + 1, state: status, event: status === 'open' ? 'reopened' : status, created_at: updated });
     state = status;
   };
-  return { cli, cliWith, env, dir, origin, general, review, statuses, requests, modelCalls, notices, access,
+  const watch = () => spawn(command[0], [...command.slice(1), 'watch', '--interval', '3600'], { env, stdio: 'ignore' });
+  return { cli, cliWith, watch, env, dir, origin, instance, repository, gitPath, root, general, review, statuses, requests, gitRequests, modelCalls, notices, access,
     disableStateEvents: () => { stateEventsUnavailable = true; },
     hideChange: value => { hideChange = value; },
     touch: () => { updated = new Date().toISOString(); },
@@ -226,10 +248,20 @@ export async function localFixture(t, kind, command = defaultCommand) {
     disableActivity: () => { activityUnavailable = true; }, loseWrite: () => { lost = true; }, loseNotification: () => { lostNotification = true; }, rateLimit: () => { limited = true; } };
 }
 
-export async function runFlow(t, platform, bin) {
-  const f = await localFixture(t, platform, bin);
+export async function runFlow(t, kind, bin, tls = false) {
+  const f = await localFixture(t, kind, bin, tls);
+  const platform = kind.startsWith('gitlab') ? 'gitlab' : 'github';
+  const connect = (login = 'owner') => ['connect', platform, f.repository, '--publisher', login, '--instance', f.instance];
+  if (kind !== platform) {
+    const tokenName = platform === 'gitlab' ? 'GITLAB_TOKEN' : 'GITHUB_TOKEN';
+    await assert.rejects(f.cliWith({ [tokenName]: 'wrong-fixture-token' })(...connect()), /API GET failed \(401\)/);
+    await assert.rejects(f.cli(...connect('someone-else')), /게시 계정.*다릅니다/);
+    assert.equal(JSON.parse((await f.cli('status')).stdout).repositories.length, 0);
+    if (tls) await assert.rejects(f.cliWith({ NODE_EXTRA_CA_CERTS: '' })(...connect()), /fetch failed/);
+  }
   f.oldMerge();
-  await f.cli('connect', platform, 'owner/repo', '--publisher', 'owner', '--instance', f.origin);
+  await f.cli(...connect());
+  assert.ok(f.requests.some(([method, path]) => method === 'GET' && path === f.root));
   await f.cli('model', 'ollama', '--model', 'fixture', '--url', f.origin);
   await f.cli('watch', '--once');
   await f.cli('watch', '--once');
@@ -240,7 +272,9 @@ export async function runFlow(t, platform, bin) {
   f.merge();
   const first = await f.cli('watch', '--once');
   assert.doesNotMatch(first.stderr, /조회 실패|jobId/);
+  assert.ok(f.gitRequests.includes(`${f.gitPath}info/refs`), 'Git requests the browser-base repository with Basic auth');
   assert.equal(f.modelCalls.length, 1);
+  assert.match(f.modelCalls[0].messages[0].content, /결제 규칙\.ts/);
   assert.equal(f.review.length, 2);
   const summary = f.general.find(c => c.body.includes('codereviewbot:summary'));
   assert.match(summary.body, /#### Q1\./);
@@ -326,6 +360,51 @@ for (const forge of ['github', 'gitlab']) {
       f.access.gitlabScopes = ['api'];
       f.access.gitlabRole = 20;
       assert.match((await f.cli('doctor')).stdout, /\[선택 기능\] 커밋 상태 쓰기.*Developer/);
+    }
+  });
+}
+
+test('a GitHub Enterprise Server API prefix keeps the web and Git URLs on the repository root', async t => {
+  await runFlow(t, 'github-enterprise');
+});
+
+test('private GitLab auth and Git paths work for a nested project under a relative URL', async t => {
+  await runFlow(t, 'gitlab-private');
+});
+
+test('enterprise REST and Git trust a supplied CA for the same HTTPS fixture', {
+  skip: process.env.HEYBOT_TEST_TLS !== '1' && 'set HEYBOT_TEST_TLS=1 with OpenSSL on PATH',
+}, async t => {
+  await runFlow(t, 'github-enterprise', undefined, true);
+});
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  test(`a foreground watcher releases its SQLite lock and exits cleanly on ${signal}`, {
+    skip: process.platform === 'win32' && 'Windows console Ctrl+C requires a native console',
+    timeout: 15000,
+  }, async t => {
+    const f = await localFixture(t, 'github');
+    await f.cli('connect', 'github', f.repository, '--publisher', 'owner', '--observe', '--instance', f.instance);
+    const status = async () => JSON.parse((await f.cli('status')).stdout);
+    const watcher = f.watch();
+    const exit = once(watcher, 'close');
+    try {
+      const deadline = Date.now() + 5000;
+      let current = await status();
+      while (!current.cursors.length && Date.now() < deadline) {
+        await delay(20);
+        current = await status();
+      }
+      assert.equal(current.cursors.length, 1, 'watcher persisted its first poll');
+      assert.equal(current.watching, true);
+      await assert.rejects(f.cli('watch', '--once'), /이미/);
+      assert.ok(watcher.kill(signal));
+      assert.deepEqual(await once(watcher, 'close', { signal: AbortSignal.timeout(5000) }), [0, null]);
+      assert.equal((await status()).watching, false);
+      await f.cli('watch', '--once');
+    } finally {
+      if (watcher.exitCode === null && watcher.signalCode === null) watcher.kill('SIGKILL');
+      await exit;
     }
   });
 }

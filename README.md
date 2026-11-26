@@ -24,6 +24,14 @@ heybot_local watch
 
 GitLab은 `GITLAB_TOKEN`을 설정하고 `heybot_local connect gitlab GROUP/PROJECT --publisher YOUR_GITLAB_LOGIN`으로 연결합니다. 여러 저장소를 연결할 수 있습니다. 사내 포지는 `--instance`, 저장소별 토큰은 `--token-env NAME`으로 지정합니다. GitHub Enterprise에서는 REST API 기본 URL을 사용합니다. GitLab에서는 인스턴스 기본 URL을 사용합니다.
 
+| 사내 포지 | `--instance` 예시 | 인증과 Git 경로 |
+| --- | --- | --- |
+| GitHub Enterprise Server | `https://github.example.com/api/v3` | REST는 Bearer 토큰을 사용합니다. Git은 토큰을 HTTPS 비밀번호로 사용해 `https://github.example.com/OWNER/REPO.git`을 읽습니다. [GitHub REST 가이드](https://docs.github.com/en/enterprise-server@3.19/rest/using-the-rest-api/getting-started-with-the-rest-api) |
+| GitHub Enterprise Cloud (GHE.com) | `https://api.TENANT.ghe.com` | REST와 웹 호스트가 다릅니다. Git은 `https://TENANT.ghe.com/OWNER/REPO.git`을 읽습니다. [GHE.com REST 가이드](https://docs.github.com/en/enterprise-cloud@latest/rest/using-the-rest-api/getting-started-with-the-rest-api) |
+| GitLab Self-Managed | `https://git.example.com/gitlab` | `GROUP/SUBGROUP/PROJECT`도 연결할 수 있습니다. REST는 `/gitlab/api/v4`와 `PRIVATE-TOKEN` 헤더를 사용합니다. Git은 토큰을 HTTPS 비밀번호로 사용해 `/gitlab/GROUP/SUBGROUP/PROJECT.git`을 읽습니다. [GitLab 경로 접두어](https://docs.gitlab.com/install/relative_url/) · [토큰 인증](https://docs.gitlab.com/user/profile/personal_access_tokens/) |
+
+사내 CA를 쓰면 신뢰할 PEM 번들의 절대 경로를 Node용 `NODE_EXTRA_CA_CERTS`와 Git용 `GIT_SSL_CAINFO`에 각각 설정한 셸에서 CLI를 시작합니다. Git for Windows의 CA 번들 처리는 TLS 백엔드에 따라 달라집니다. 인증서와 호스트 이름 검사는 유지됩니다. [Node 인증서 설정](https://nodejs.org/download/release/v22.13.0/docs/api/cli.html#node_extra_ca_certsfile) · [Git 인증서 설정](https://git-scm.com/docs/git-config#Documentation/git-config.txt-httpsslCAInfo)
+
 | 설정 | 토큰 권한 |
 | --- | --- |
 | GitHub | 지정 저장소에 대한 Contents 읽기, Pull requests 쓰기, Issues 댓글 쓰기와 collaborator 권한 조회. `requireAnswers`를 쓸 경우 Commit statuses 쓰기 |
@@ -136,11 +144,85 @@ heybot_local connect gitlab GROUP/PROJECT --publisher YOUR_GITLAB_LOGIN --notify
 
 실연동은 공개 `heybot_local` 저장소의 테스트 브랜치와 합성 코드에 한정했습니다.
 
+### 0.2.0 운영체제·사내 포지 검증 (2026-11-26)
+
+| 대상 | 확인 결과 |
+| --- | --- |
+| Linux ARM64 (Debian 12) | Node 22.13.0, npm 10.9.2, Git 2.39.5. 공백·한글이 있는 소스와 설치 경로에서 `npm ci`, 전체 테스트 131개, `npm pack`, 임시 경로 전역 설치와 설치된 CLI의 통합 테스트를 통과했습니다. Git에서 받은 공백·한글 파일명이 모델 입력에 포함되는 것도 확인했습니다. |
+| Linux 감시 종료 | 포그라운드 감시가 첫 조회를 저장하면 두 번째 감시가 SQLite 잠금으로 거부됩니다. `SIGINT`와 `SIGTERM`에서 종료 코드 0, `status`의 `watching: false`, 이후 `watch --once` 재실행을 확인했습니다. |
+| Windows | 네이티브 실행이 남아 있습니다. 아래 절차에서 Git for Windows, npm `.cmd` 실행, 공백·한글 경로, 설치된 CLI 통합 테스트와 콘솔 `Ctrl+C` 종료를 확인할 수 있습니다. [Node 자식 프로세스](https://nodejs.org/download/release/v22.13.0/docs/api/child_process.html#spawning-bat-and-cmd-files-on-windows) · [Node 신호 처리](https://nodejs.org/download/release/v22.13.0/docs/api/process.html#signal-events) |
+| GitHub Enterprise·비공개 GitLab | 루프백 fixture에서 GHES `/api/v3`, GitLab `/gitlab/api/v4`와 중첩 프로젝트의 인코딩, 토큰과 계정 확인, 잘못된 토큰과 게시 계정 거부, 인증된 Git fetch(HTTP 객체 서빙)를 확인했습니다. GHE.com은 API 호스트에서 웹·Git 호스트를 계산하는 테스트를 통과했습니다. 승인된 실제 사내 포지에서 연결·읽기·게시 권한 확인이 남아 있습니다. [GitLab 경로 인코딩](https://docs.gitlab.com/api/rest/#namespaced-paths) |
+| 사내 CA | 합성 CA를 사용하는 로컬 HTTPS GHES fixture에서 CA 설정 전 REST 실패와 설정 후 REST·Git fetch 성공을 확인했습니다. 실제 사내 CA 및 Git for Windows에서의 TLS 연동 확인이 남아 있습니다. |
+
+#### Linux 재현
+
+Node.js와 Git, OpenSSL이 있는 Linux에서 저장소 루트를 공백·한글이 포함된 경로에 두고 실행합니다. 위 검증에는 `node:22.13.0-bookworm`을 사용했습니다. `HEYBOT_TEST_TLS=1`은 루프백 HTTPS 테스트를 켭니다.
+
+```sh
+npm ci
+HEYBOT_TEST_TLS=1 npm test
+npm pack
+scratch="$(mktemp -d)"
+prefix="$scratch/HeyBot 검증"
+npm install -g --prefix "$prefix" ./heybot_local-0.2.0.tgz
+"$prefix/bin/heybot_local" --help
+HEYBOT_TEST_TLS=1 HEYBOT_PACKED_BIN="$prefix/bin/heybot_local" node --test test/local-flow.test.mjs
+rm -rf -- "$scratch"
+```
+
+#### Windows 재현
+
+Node.js와 Git for Windows가 있는 PowerShell에서 저장소 루트를 공백·한글이 포함된 경로에 두고 실행합니다.
+
+```powershell
+npm.cmd ci
+npm.cmd test
+npm.cmd pack
+$prefix = Join-Path ([IO.Path]::GetTempPath()) ("HeyBot 검증 " + [guid]::NewGuid())
+npm.cmd install -g --prefix $prefix .\heybot_local-0.2.0.tgz
+$bin = Join-Path $prefix 'heybot_local.cmd'
+& $bin --help
+$env:HEYBOT_PACKED_CLI = Join-Path $prefix 'node_modules\heybot_local\dist\cli.js'
+node --test .\test\local-flow.test.mjs
+Remove-Item Env:HEYBOT_PACKED_CLI
+```
+
+Windows 콘솔 종료를 확인하려면 별도 PowerShell 창에서 다음 로컬 응답기를 실행합니다.
+
+```powershell
+@'
+require('node:http').createServer((req, res) => {
+  const value = req.url === '/user' ? { login: 'fixture' } : req.url.includes('?') ? [] : { id: 1 };
+  res.setHeader('Content-Type', 'application/json');
+  res.end(JSON.stringify(value));
+}).listen(19735, '127.0.0.1');
+'@ | node -
+```
+
+설치한 창에서 관찰 모드로 감시를 시작합니다.
+
+```powershell
+$env:HEYBOT_HOME = Join-Path $prefix 'watch-profile'
+$env:HEYBOT_TEST_TOKEN = 'fixture'
+Write-Output $env:HEYBOT_HOME
+Write-Output $bin
+& $bin connect github fixture/repo --publisher fixture --observe --token-env HEYBOT_TEST_TOKEN --instance http://127.0.0.1:19735
+& $bin watch --interval 3600
+```
+
+다른 PowerShell 창에서 출력된 `HEYBOT_HOME`을 설정하고 같은 `heybot_local.cmd`의 `status`에서 `watching: true`와 조회 커서 1개를 확인합니다. 감시 창에서 `Ctrl+C`를 누른 뒤 그 창에서 아래 명령을 실행합니다. `watching: false`와 `watch --once` 성공을 확인합니다. 검증을 마치면 로컬 응답기도 `Ctrl+C`로 종료하고 임시 설치 경로를 삭제합니다.
+
+```powershell
+& $bin status
+& $bin watch --once
+$LASTEXITCODE
+```
+
 ## 범용 배포에서 확인할 항목
 
 | 항목 | 현재 지원 범위와 남은 확인 |
 | --- | --- |
-| 운영체제와 포지 | macOS에서 Node 22·26과 GitHub.com을 실검증했습니다. Linux·Windows의 설치·종료 동작, 비공개 GitLab, GitHub Enterprise 및 사내 CA 환경의 실연동 결과가 필요합니다. |
+| 운영체제와 포지 | Windows 네이티브 설치·종료와 GitHub Enterprise·비공개 GitLab·사내 CA 실연동이 남아 있습니다. 사내 포지 읽기는 승인된 저장소에서 `connect … --observe`와 `watch --once`로 확인할 수 있습니다. |
 | 최초 설정 | `doctor`로 토큰·저장소 읽기와 권한 메타데이터, 모델·웹훅 설정을 점검할 수 있습니다. 댓글·커밋 상태 쓰기와 웹훅 수신은 실제 작업에서 확인합니다. |
 | 모델 인증 | Codex ChatGPT 로그인, Claude API 키, 로컬 Ollama를 설정할 수 있습니다. Claude 구독과 Ollama·Claude 유료 API의 실제 실행 범위는 검증 표를 참고합니다. |
 | 알림 관리 | 저장소마다 알림 대상 한 곳, 이벤트 종류와 댓글 미리보기 표시 여부를 설정할 수 있습니다. 실제 협업 채널에서 설정 전환과 수신을 확인할 항목이 남아 있습니다. |
