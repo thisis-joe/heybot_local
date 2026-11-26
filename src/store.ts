@@ -72,6 +72,7 @@ export class Store {
         state TEXT NOT NULL, due INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, error TEXT
       );
       CREATE INDEX IF NOT EXISTS notifications_queue ON notifications(repository,state,due);
+      CREATE TABLE IF NOT EXISTS notification_filters (repository TEXT PRIMARY KEY, starts TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS api_limits (key TEXT PRIMARY KEY, until INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS mr_states (target TEXT PRIMARY KEY, state TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(state,due,sequence);
@@ -104,11 +105,15 @@ export class Store {
   saveApiLimit(key: string, until: number): void {
     this.db.prepare('INSERT INTO api_limits VALUES(?,?) ON CONFLICT(key) DO UPDATE SET until=max(until,excluded.until)').run(key, until);
   }
-  mrState(target: Target): string | undefined {
-    return this.db.prepare('SELECT state FROM mr_states WHERE target=?').get(targetKey(target))?.state as string | undefined;
+  mrState(target: Target): { state: string; observedAt: number } | undefined {
+    const value = this.db.prepare('SELECT state FROM mr_states WHERE target=?').get(targetKey(target))?.state;
+    if (typeof value !== 'string') return undefined;
+    // Legacy profiles stored the state alone, before filter activation needed an observation time.
+    return value.startsWith('{') ? JSON.parse(value) : { state: value, observedAt: 0 };
   }
-  rememberMrState(target: Target, state: string): void {
-    this.db.prepare('INSERT INTO mr_states VALUES(?,?) ON CONFLICT(target) DO UPDATE SET state=excluded.state').run(targetKey(target), state);
+  rememberMrState(target: Target, state: string, observedAt: number): void {
+    this.db.prepare('INSERT INTO mr_states VALUES(?,?) ON CONFLICT(target) DO UPDATE SET state=excluded.state')
+      .run(targetKey(target), JSON.stringify({ state, observedAt }));
   }
   enqueue(event: Event): void {
     this.db.prepare('INSERT OR IGNORE INTO jobs(id,target_key,delivery,kind,body,state) VALUES(?,?,?,?,?,\'queued\')')

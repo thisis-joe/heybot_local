@@ -46,6 +46,7 @@ export async function localFixture(t, kind, command = defaultCommand) {
   const general = [], review = [], modelCalls = [], statuses = [], requests = [], notices = [], transitions = [], pushes = [];
   const access = { login: 'owner', githubScopes: 'repo', githubPush: true, gitlabScopes: ['api'], gitlabRole: 30, commitsStatus: 200 };
   let updated = '2025-01-01T00:00:00.000Z', created = updated, merged = null, state = gitlab ? 'opened' : 'open', lost = false, lostNotification = false, limited = false, activityUnavailable = false;
+  let stateEventsUnavailable = false, hideChange = false;
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url, origin);
@@ -102,7 +103,7 @@ export async function localFixture(t, kind, command = defaultCommand) {
       if (route === '/members/all/3') return json({ access_level: access.gitlabRole });
       if (route === (gitlab ? '/merge_requests' : '/pulls')) {
         const after = url.searchParams.get('updated_after');
-        return paginated(!after || Date.parse(updated) >= Date.parse(after) ? [pull] : []);
+        return paginated(!hideChange && (!after || Date.parse(updated) >= Date.parse(after)) ? [pull] : []);
       }
       if (route === (gitlab ? '/merge_requests/1' : '/pulls/1')) return json(pull);
       if (route.startsWith('/compare/')) {
@@ -129,7 +130,7 @@ export async function localFixture(t, kind, command = defaultCommand) {
       if (route === `/statuses/${head}`) { statuses.push(body); return json(body, 201); }
       if (route === '/merge_requests/1/pipelines') return paginated([]);
       if (route === '/events') return paginated(pushes.toReversed());
-      if (route.endsWith('/resource_state_events')) return paginated(transitions);
+      if (route.endsWith('/resource_state_events')) return stateEventsUnavailable ? json({}, 404) : paginated(transitions);
       if (route === '/repository/compare') {
         assert.equal(url.searchParams.get('straight'), 'true');
         assert.equal(url.searchParams.get('from'), base);
@@ -196,6 +197,9 @@ export async function localFixture(t, kind, command = defaultCommand) {
     state = status;
   };
   return { cli, cliWith, env, dir, origin, general, review, statuses, requests, modelCalls, notices, access,
+    disableStateEvents: () => { stateEventsUnavailable = true; },
+    hideChange: value => { hideChange = value; },
+    touch: () => { updated = new Date().toISOString(); },
     open: () => transition(gitlab ? 'opened' : 'open'),
     create: () => { created = updated = new Date().toISOString(); state = gitlab ? 'opened' : 'open'; },
     close: () => transition('closed'),
@@ -525,6 +529,140 @@ test('GitHub sends PR lifecycle, both comment surfaces, question, commit range a
   assert.match(all, /질문이 준비됐어요\.[\s\S]*?\/pull\/1#issuecomment-/);
   assert.ok(f.requests.some(([, path, , after]) => path === '/repos/owner/repo/activity' && after === 'fixture+2'));
   assert.ok(JSON.parse((await f.cli('status')).stdout).notifications.some(row => row.state === 'sent' && row.error === 'range_unavailable'));
+});
+
+
+for (const forge of ['github', 'gitlab']) {
+  test(`${forge} notification controls preserve the queue, deduplication and learning flows`, async t => {
+    const f = await localFixture(t, forge);
+    const connect = (...flags) => f.cli('connect', forge, 'owner/repo', '--publisher', 'owner', '--instance', f.origin,
+      '--notify', 'webhook', '--notify-url-env', 'FIXTURE_WEBHOOK', ...flags);
+    const watch = () => f.cli('watch', '--once');
+    const db = () => new DatabaseSync(join(f.env.HEYBOT_HOME, 'state.sqlite'));
+    const makeNotificationsDue = () => {
+      const state = db();
+      try { state.exec("UPDATE notifications SET due=0 WHERE state='queued'"); }
+      finally { state.close(); }
+    };
+    await connect();
+    await f.cli('model', 'ollama', '--model', 'fixture', '--url', f.origin);
+    await watch();
+    f.create();
+    f.note('visible by default');
+    await watch();
+    assert.deepEqual(f.notices.map(item => item.event).sort(), ['commented', 'opened']);
+    assert.match(f.notices.find(item => item.event === 'commented').text, /visible by default/);
+
+    const queued = f.note('stale preview');
+    f.push('pushed', 'queuedBranch');
+    await f.cliWith({ FIXTURE_WEBHOOK: '' })('watch', '--once');
+    assert.equal(f.notices.length, 2);
+    const state = db();
+    try {
+      assert.match(state.prepare("SELECT group_concat(payload) AS payloads FROM notifications WHERE state='queued'").get().payloads, /stale preview/);
+    } finally { state.close(); }
+
+    const watchLock = new DatabaseSync(join(f.env.HEYBOT_HOME, 'watch-lock.sqlite'));
+    try {
+      watchLock.exec('BEGIN IMMEDIATE');
+      await assert.rejects(connect('--no-notify-comment-preview'), /이미 heybot_local이 실행 중/);
+    } finally { watchLock.close(); }
+    await assert.rejects(connect('--notify-events', 'commented,typo'), /notifications\.events\.1/);
+    await assert.rejects(f.cli('connect', forge, 'owner/repo', '--publisher', 'owner', '--instance', f.origin,
+      '--no-notify-comment-preview'), error => /--notify에 알림 서비스를 지정/.test(error.stderr));
+    await connect('--notify-events', 'commented', '--no-notify-comment-preview');
+    const filtered = db();
+    try {
+      assert.equal(filtered.prepare("SELECT count(*) AS count FROM notifications WHERE state='queued' AND json_type(payload,'$.preview') IS NOT NULL").get().count, 0);
+      assert.equal(filtered.prepare("SELECT count(*) AS count FROM notifications WHERE state='skipped' AND error='event_filtered'").get().count, 1);
+    } finally { filtered.close(); }
+    makeNotificationsDue();
+    const reply = f.reply({ id: null, discussion_id: 'thread-human' }, 'new private preview');
+    f.note('/hey help');
+    f.merge();
+    f.push('pushed', 'whileFiltered');
+    f.push('created', 'oldNewBranch');
+    const requestStart = f.requests.length;
+    await watch();
+    assert.equal(f.requests.slice(requestStart).some(([, path]) => /\/(activity|events)$/.test(path)), false);
+    assert.equal(f.modelCalls.length, 1);
+    assert.equal(f.general.filter(c => c.body.includes('codereviewbot:summary')).length, 1);
+    assert.equal(f.general.filter(c => c.body.includes('codereviewbot:reply:')).length, 1);
+    assert.deepEqual(f.notices.slice(2).map(item => item.event), ['commented', 'commented', 'commented']);
+    const [older, ...newer] = f.notices.slice(2);
+    assert.ok(older.text.includes(forge === 'github' ? `#issuecomment-${queued.id}` : `#note_${queued.id}`));
+    assert.ok(newer.some(item => item.text.includes(forge === 'github' ? `#discussion_r${reply.id}` : `#note_${reply.id}`)));
+    for (const item of f.notices.slice(2)) {
+      assert.match(item.text, /owner.*댓글을 남겼어요/);
+      assert.doesNotMatch(item.text, /stale preview|new private preview|\/hey help|\*“/);
+    }
+
+    await connect('--notify-events', 'commented,push,questions');
+    await delay(2);
+    f.push('pushed', 'freshPush');
+    f.push('created', 'stillFilteredCreation');
+    f.note('preview restored');
+    await watch();
+    await watch();
+    assert.deepEqual(f.notices.slice(5).map(item => item.event).sort(), ['commented', 'push']);
+    assert.ok(f.notices.some(item => item.text.includes('freshPush')));
+    assert.ok(f.notices.some(item => item.text.includes('preview restored')));
+    assert.doesNotMatch(f.notices.map(item => item.text).join('\n'), /queuedBranch|whileFiltered|oldNewBranch|stillFilteredCreation/);
+
+    const last = f.note('queued between restarts');
+    await f.cliWith({ FIXTURE_WEBHOOK: '' })('watch', '--once');
+    f.close();
+    f.open();
+    await connect('--notify-events', 'commented,push,questions', '--no-notify-comment-preview');
+    await connect('--notify-events', 'branch-created,commented,questions,reopened');
+    makeNotificationsDue();
+    await delay(2);
+    f.close();
+    f.open();
+    f.push('created', 'freshNewBranch');
+    f.push('pushed', 'ignoredPush');
+    await watch();
+    assert.deepEqual(f.notices.slice(7).map(item => item.event), ['commented', 'reopened', 'push']);
+    assert.ok(f.notices[7].text.includes(forge === 'github' ? `#issuecomment-${last.id}` : `#note_${last.id}`));
+    assert.doesNotMatch(f.notices[7].text, /queued between restarts/);
+    assert.match(f.notices[9].text, /freshNewBranch/);
+    assert.doesNotMatch(f.notices.map(item => item.text).join('\n'), /oldNewBranch|stillFilteredCreation|ignoredPush/);
+    assert.equal(new Set(f.notices.map(item => item.id)).size, f.notices.length);
+  });
+}
+
+test('GitLab fallback does not date an old transition from a later update after re-enabling an alert', async t => {
+  const f = await localFixture(t, 'gitlab');
+  const select = event => f.cli('connect', 'gitlab', 'owner/repo', '--publisher', 'owner', '--instance', f.origin,
+    '--notify', 'webhook', '--notify-url-env', 'FIXTURE_WEBHOOK', '--notify-events', event);
+  const watch = () => f.cli('watch', '--once');
+  f.disableStateEvents();
+  await select('closed');
+  await f.cli('model', 'ollama', '--model', 'fixture', '--url', f.origin);
+  await watch();
+  const legacy = new DatabaseSync(join(f.env.HEYBOT_HOME, 'state.sqlite'));
+  try { legacy.exec("UPDATE mr_states SET state='opened'"); }
+  finally { legacy.close(); }
+  f.close();
+  await watch();
+  assert.deepEqual(f.notices.map(item => item.event), ['closed']);
+  f.open();
+  await watch();
+  await select('commented');
+  f.close();
+  await watch();
+  await select('closed');
+  f.hideChange(true);
+  await watch();
+  f.hideChange(false);
+  f.touch();
+  await watch();
+  assert.equal(f.notices.length, 1);
+  f.open();
+  await watch();
+  f.close();
+  await watch();
+  assert.deepEqual(f.notices.map(item => item.event), ['closed', 'closed']);
 });
 
 test('an unavailable GitHub activity feed leaves merge questions and other notifications working', async t => {

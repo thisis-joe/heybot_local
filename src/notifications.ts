@@ -1,4 +1,4 @@
-import { credential, loopback, repositoryKey, repositoryWebBase, trustedUrl, type NotificationProvider } from './config.js';
+import { credential, loopback, repositoryKey, repositoryWebBase, trustedUrl, NotificationEvent, type NotificationProvider, type RepositoryConfig } from './config.js';
 import { createHash } from 'node:crypto';
 import type { Target, Report } from './contracts.js';
 import { hasChangeQuestions } from './contracts.js';
@@ -77,24 +77,81 @@ export function renderNotification(target: Target, notification: Notification, a
 }
 
 
+type EventStarts = Partial<Record<NotificationEvent, number>>;
+
+function eventKind(payload: Notification): NotificationEvent {
+  return payload.kind === 'push' && /^0+$/.test(payload.before) ? 'branch-created' : payload.kind;
+}
+
+function withoutPreview(payload: Notification): Notification {
+  if (payload.kind !== 'commented') return payload;
+  const { preview, ...comment } = payload;
+  return comment;
+}
+
+/** The watcher lock serializes applying controls with scanning and delivery. */
+export function applyNotificationControls(store: Store, repo: RepositoryConfig, now = Date.now()): EventStarts {
+  const config = repo.notifications;
+  if (!config) return {};
+  const key = repositoryKey(repo);
+  return store.transaction(() => {
+    const row = store.db.prepare('SELECT starts FROM notification_filters WHERE repository=?').get(key);
+    const previous: EventStarts | undefined = row && JSON.parse(String(row.starts));
+    const starts: EventStarts = {};
+    for (const kind of config.events ?? NotificationEvent.options) {
+      // Keep the cutoff of events that stay enabled. Only newly enabled events start at this change.
+      starts[kind] = previous ? previous[kind] ?? now : 0;
+    }
+    const data = JSON.stringify(starts);
+    if (data !== row?.starts) {
+      store.db.prepare('INSERT INTO notification_filters VALUES(?,?) ON CONFLICT(repository) DO UPDATE SET starts=excluded.starts')
+        .run(key, data);
+    }
+    if (config.events || config.commentPreview === false) {
+      // Include paused destinations for the same repository. Destination scopes start with the key followed by ':'.
+      const queued = store.db.prepare("SELECT key,payload FROM notifications WHERE repository>=? AND repository<? AND state='queued'")
+        .all(key + ':', key + ';');
+      const removePreview = store.db.prepare("UPDATE notifications SET payload=json_remove(payload,'$.preview') WHERE key=?");
+      const skip = store.db.prepare("UPDATE notifications SET state='skipped',error='event_filtered' WHERE key=?");
+      for (const row of queued) {
+        const id = String(row.key);
+        const payload = JSON.parse(String(row.payload)) as Notification;
+        if (config.commentPreview === false && payload.kind === 'commented' && payload.preview !== undefined)
+          removePreview.run(id);
+        if (starts[eventKind(payload)] === undefined) skip.run(id);
+      }
+    }
+    return starts;
+  });
+}
+
 /** Destinations come from the local configuration. Save intent before attempting the HTTP write. */
 export class Notifications {
   private readonly destinations = new Map<string, Platform>();
+  private readonly eventStarts = new Map<string, EventStarts>();
   constructor(readonly store: Store, platforms: Platform[], readonly transport: typeof fetch = fetch) {
     for (const platform of platforms) {
       const config = platform.config;
-      if (config.mode === 'publish' && config.notifications)
-        this.destinations.set(repositoryKey(config), platform);
+      if (config.mode === 'publish' && config.notifications) {
+        const key = repositoryKey(config);
+        this.destinations.set(key, platform);
+        this.eventStarts.set(key, applyNotificationControls(store, config));
+      }
     }
   }
   enabled(target: Pick<Target, 'platform' | 'instance' | 'repository'>): boolean {
     return this.destinations.has(repositoryKey(target));
   }
+  startsAfter(target: Pick<Target, 'platform' | 'instance' | 'repository'>, kind: NotificationEvent): number {
+    return this.eventStarts.get(repositoryKey(target))?.[kind] ?? Infinity;
+  }
   scope(target: Pick<Target, 'platform' | 'instance' | 'repository'>): string {
     const key = repositoryKey(target);
     const config = this.destinations.get(key)?.config.notifications;
     if (!config) throw new Error('Notification destination unavailable');
-    return `${key}:${JSON.stringify(config)}`;
+    // Preserve the original scope, including its JSON field order, for existing cursors and delivery IDs.
+    const { provider, urlEnv, channel } = config;
+    return `${key}:${JSON.stringify({ provider, urlEnv, channel })}`;
   }
   startedAt(target: Pick<Target, 'platform' | 'instance' | 'repository'>, now: number): number {
     const key = this.scope(target) + ':notifications';
@@ -103,19 +160,24 @@ export class Notifications {
     this.store.saveScan(key, { baseline: now, through: now }, []);
     return now;
   }
-  enqueue(target: Target, source: string, payload: Notification | null): void {
-    if (!this.enabled(target)) return;
+  enqueue(target: Target, source: string, payload: Notification | null, at: number): void {
+    const cutoff = payload ? this.startsAfter(target, eventKind(payload))
+      : Math.min(this.startsAfter(target, 'push'), this.startsAfter(target, 'branch-created'));
+    if (!(at > cutoff)) return;
+    const config = this.destinations.get(repositoryKey(target))!.config.notifications!;
+    if (payload && config.commentPreview === false) payload = withoutPreview(payload);
     const scope = this.scope(target);
     const key = createHash('sha256').update(`${scope}:${targetKey(target)}:${source}`).digest('hex');
     this.store.db.prepare('INSERT OR IGNORE INTO notifications(key,repository,target,payload,state,error) VALUES(?,?,?,?,?,?)')
       .run(key, scope, JSON.stringify(target), JSON.stringify(payload), payload ? 'queued' : 'skipped', payload ? null : 'incomplete_push_event');
   }
   async questionsPublished(platform: Platform, report: Report): Promise<void> {
-    if (!this.enabled(platform.config) || !hasChangeQuestions(report)) return;
+    const at = Date.now();
+    if (at <= this.startsAfter(platform.config, 'questions') || !hasChangeQuestions(report)) return;
     const marker = summaryMarker(report.snapshot);
     const comment = (await platform.comments(report.snapshot.number)).find(c => platform.owned(c) && c.body.includes(marker));
     if (!comment || !/^\d+$/.test(comment.id)) throw new Error('Published question comment unavailable');
-    this.enqueue(report.snapshot, `questions:${marker}`, { kind: 'questions', title: report.snapshot.title, count: report.questions.length, noteId: comment.id });
+    this.enqueue(report.snapshot, `questions:${marker}`, { kind: 'questions', title: report.snapshot.title, count: report.questions.length, noteId: comment.id }, at);
   }
   async drain(active: Set<string>, signal: AbortSignal): Promise<void> {
     for (const repository of active) {
@@ -169,7 +231,8 @@ export class Notifications {
       else settle(attempt < 3 ? 'queued' : 'failed', 'source_lookup_failed', Date.now() + 60000);
       return;
     }
-    const payload = webhookBody(config.provider, target, notification, author, key, config.channel);
+    const payload = webhookBody(config.provider, target, config.commentPreview === false ? withoutPreview(notification) : notification,
+      author, key, config.channel);
     settle('sending', null);
     try {
       const response = await this.transport(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), redirect: 'error', signal: AbortSignal.timeout(5000) });
