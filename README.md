@@ -134,7 +134,7 @@ heybot_local connect gitlab GROUP/PROJECT --publisher YOUR_GITLAB_LOGIN --notify
 
 | 항목 | 검증 범위 |
 | --- | --- |
-| 설치 패키지 | `npm pack`으로 만든 tarball을 깨끗한 npm 디렉터리에 설치. macOS에서 Node 22.23.5 및 26.0.0으로 CLI와 양쪽 포지의 격리 머지→질문→답변·해설 확인 |
+| 설치 패키지 | `npm pack`으로 만든 tarball을 깨끗한 npm 디렉터리에 설치. v0.3.0에서 macOS(Node 26.0.0)와 Linux ARM64(Node 22.13.0) 각각 전체 테스트 138개와 설치된 CLI 테스트 27개 통과 |
 | 폴링과 복구 | 두 댓글 표면, 페이지네이션과 429 후 재개, 응답 유실 후 마커 대조, SQLite 이력, 전용 게시자와 관찰자 |
 | 모델 | 공식 Codex CLI 0.169.0과 ChatGPT 로그인으로 한국어 질문 생성과 근거 채점 확인. Claude API 구조화 출력 및 Ollama 출제·채점은 격리 응답으로 검증. 실행 중인 Ollama와 테스트용 Claude API 키가 없어 두 모델의 실제 호출은 미검증 |
 | GitHub | 사용자 승인 테스트 저장소에서 설치 패키지로 검증. PR #1의 실제 머지, 요약 1개와 인라인 질문 2개, 같은 계정의 복수 답변과 근거 채점, 문항별 인라인 해설. PR #2에서 `requireAnswers`의 pending→success와 닫힌 PR의 도움말 확인. [머지 PR](https://github.com/thisis-joe/heybot_local/pull/1) · [채점](https://github.com/thisis-joe/heybot_local/pull/1#issuecomment-7186399720) · [스레드 해설](https://github.com/thisis-joe/heybot_local/pull/1#discussion_r4705494257) · [답변 상태 PR](https://github.com/thisis-joe/heybot_local/pull/2) |
@@ -148,7 +148,7 @@ heybot_local connect gitlab GROUP/PROJECT --publisher YOUR_GITLAB_LOGIN --notify
 
 | 대상 | 확인 결과 |
 | --- | --- |
-| Linux ARM64 (Debian 12) | Node 22.13.0, npm 10.9.2, Git 2.39.5. 공백·한글이 있는 소스와 설치 경로에서 `npm ci`, 전체 테스트 131개, `npm pack`, 임시 경로 전역 설치와 설치된 CLI의 통합 테스트를 통과했습니다. Git에서 받은 공백·한글 파일명이 모델 입력에 포함되는 것도 확인했습니다. |
+| Linux ARM64 (Debian 12) | Node 22.13.0, npm 10.9.2, Git 2.39.5. 공백·한글이 있는 소스와 설치 경로에서 `npm ci`, v0.3.0 전체 테스트 138개, `npm pack`, 임시 설치 경로의 CLI 테스트 27개를 통과했습니다. Git에서 받은 공백·한글 파일명이 모델 입력에 포함되는 것도 확인했습니다. |
 | Linux 감시 종료 | 포그라운드 감시가 첫 조회를 저장하면 두 번째 감시가 SQLite 잠금으로 거부됩니다. `SIGINT`와 `SIGTERM`에서 종료 코드 0, `status`의 `watching: false`, 이후 `watch --once` 재실행을 확인했습니다. |
 | Windows | 네이티브 실행이 남아 있습니다. 아래 절차에서 Git for Windows, npm `.cmd` 실행, 공백·한글 경로, 설치된 CLI 통합 테스트와 콘솔 `Ctrl+C` 종료를 확인할 수 있습니다. [Node 자식 프로세스](https://nodejs.org/download/release/v22.13.0/docs/api/child_process.html#spawning-bat-and-cmd-files-on-windows) · [Node 신호 처리](https://nodejs.org/download/release/v22.13.0/docs/api/process.html#signal-events) |
 | GitHub Enterprise·비공개 GitLab | 루프백 fixture에서 GHES `/api/v3`, GitLab `/gitlab/api/v4`와 중첩 프로젝트의 인코딩, 토큰과 계정 확인, 잘못된 토큰과 게시 계정 거부, 인증된 Git fetch(HTTP 객체 서빙)를 확인했습니다. GHE.com은 API 호스트에서 웹·Git 호스트를 계산하는 테스트를 통과했습니다. 승인된 실제 사내 포지에서 연결·읽기·게시 권한 확인이 남아 있습니다. [GitLab 경로 인코딩](https://docs.gitlab.com/api/rest/#namespaced-paths) |
