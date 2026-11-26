@@ -1,0 +1,117 @@
+import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { z } from 'zod';
+import { AnswerSchema, InitialQuestionsSchema, InitialQuestionChecksSchema, InitialQuestionRepairsSchema,
+  QuestionBatchSchema, CsInterviewBatchSchema, MoreCsBatchSchema, GradeSchema } from './contracts.js';
+import { credential, trustedUrl, type ModelConfig } from './config.js';
+import { execute } from './process.js';
+import { ModelFailure, failureInfo } from './model-failure.js';
+import type { Model, ModelPhase } from './review.js';
+import { boundedText } from './http-client.js';
+import { redact } from './redact.js';
+
+export const phaseSchemas = {
+  answer: AnswerSchema, initial_questions: InitialQuestionsSchema,
+  verify_initial_questions: InitialQuestionChecksSchema, repair_initial_questions: InitialQuestionRepairsSchema,
+  questions: QuestionBatchSchema, csinterview: CsInterviewBatchSchema, morecs: MoreCsBatchSchema, grade: GradeSchema,
+} satisfies Record<ModelPhase, z.ZodType>;
+
+function codexEnv(): NodeJS.ProcessEnv {
+  const keys = ['PATH', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'SYSTEMROOT', 'TEMP', 'TMP', 'CODEX_HOME'];
+  return { HOME: homedir(), LANG: 'C.UTF-8', ...Object.fromEntries(keys.map(key => [key, process.env[key]])) };
+}
+export async function checkCodexLogin(): Promise<void> {
+  const status = await execute('codex', ['login', 'status'], { env: codexEnv(), allowFailure: true, captureStderr: true, timeoutMs: 15000 });
+  if (status.code !== 0 || !/logged in using chatgpt/i.test(Buffer.concat([status.stdout, status.stderr]).toString('utf8')))
+    throw new ModelFailure({ provider: 'codex', code: 'authentication' });
+}
+
+function outputSchema(phase: ModelPhase) {
+  const { $schema: _meta, ...schema } = z.toJSONSchema(phaseSchemas[phase], { unrepresentable: 'any' });
+  return schema;
+}
+
+async function codex(config: Extract<ModelConfig, { provider: 'codex' }>, phase: ModelPhase, prompt: string, timeoutMs: number): Promise<unknown> {
+  await checkCodexLogin();
+  const dir = await mkdtemp(join(tmpdir(), 'heybot-model-'));
+  const schema = join(dir, 'schema.json'), output = join(dir, 'answer.json');
+  try {
+    await writeFile(schema, JSON.stringify(outputSchema(phase)), { mode: 0o600 });
+    const result = await execute('codex', [
+      'exec', '--sandbox', 'read-only', '--ignore-user-config', '--ignore-rules', '--ephemeral', '--skip-git-repo-check', '--json',
+      ...['shell_tool', 'multi_agent', 'apps', 'hooks', 'browser_use', 'computer_use', 'view_image', 'image_generation'].flatMap(feature => ['--disable', feature]),
+      '-c', 'web_search="disabled"', '-c', 'approval_policy="never"', '-c', 'project_doc_max_bytes=0',
+      '--output-schema', schema, '-o', output, '-C', dir, ...(config.model ? ['--model', config.model] : []), '-',
+    ], { cwd: dir, env: codexEnv(), input: prompt, timeoutMs, maxBytes: 4 * 1024 * 1024, allowFailure: true, captureStderr: true });
+    if (result.code !== 0) {
+      const events = Buffer.concat([result.stdout, result.stderr]).toString('utf8');
+      const code = /rate.limit|usage.limit|\b429\b/i.test(events) ? 'rate_limit'
+        : /unauthori[sz]ed|authenticat|\b401\b/i.test(events) ? 'authentication' : 'unavailable';
+      throw new ModelFailure({ provider: 'codex', code });
+    }
+    const bytes = await readFile(output);
+    if (bytes.length > 512000) throw new ModelFailure({ provider: 'codex', code: 'invalid_output' });
+    return JSON.parse(bytes.toString('utf8'));
+  } finally { await rm(dir, { recursive: true, force: true }); }
+}
+
+async function httpModel(
+  config: Exclude<ModelConfig, { provider: 'codex' }>,
+  phase: ModelPhase,
+  prompt: string,
+  timeoutMs: number,
+  claudeEndpoint: string,
+): Promise<unknown> {
+  const schema = outputSchema(phase);
+  const messages = [{ role: 'user', content: prompt }];
+  const isClaude = config.provider === 'claude';
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (isClaude) {
+    try { headers['x-api-key'] = credential(config.keyEnv); }
+    catch { throw new ModelFailure({ code: 'authentication', provider: 'claude' }); }
+    headers['anthropic-version'] = '2023-06-01';
+  } else {
+    // Ollama accepts hosted model names as well. Limit this provider to installed local model blobs.
+    const tags = await fetch(`${trustedUrl(config.url, true)}/api/tags`, { redirect: 'error', signal: AbortSignal.timeout(10000) });
+    if (!tags.ok) throw new ModelFailure({ code: 'unavailable', provider: 'ollama' });
+    const models = JSON.parse(await boundedText(tags, 512000)).models;
+    const name = config.model.split('/').at(-1)?.includes(':') ? config.model : `${config.model}:latest`;
+    if (!Array.isArray(models) || !models.some(entry => (entry.name === name || entry.model === name) && /^[a-f0-9]{64}$/i.test(entry.digest ?? '') && entry.size > 0 && !entry.remote_host))
+      throw new ModelFailure({ code: 'unavailable', provider: 'ollama' });
+  }
+  const response = await fetch(isClaude ? claudeEndpoint : `${trustedUrl(config.url, true)}/api/chat`, {
+    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(timeoutMs), headers,
+    body: JSON.stringify(isClaude
+      ? { model: config.model, messages, max_tokens: 8192, output_config: { format: { type: 'json_schema', schema } } }
+      : { model: config.model, messages, stream: false, format: schema, options: { temperature: 0 } }),
+  });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new ModelFailure({ provider: config.provider, apiStatus: response.status, code: response.status === 429 ? 'rate_limit'
+      : [401, 403].includes(response.status) ? 'authentication' : response.status >= 500 || response.status === 404 ? 'unavailable' : 'invalid_output' });
+  }
+  const payload = JSON.parse(await boundedText(response, 512000));
+  const raw = isClaude
+    ? (payload.stop_reason === 'end_turn' ? payload.content?.find((block: { type: string }) => block.type === 'text')?.text : undefined)
+    : (payload.done === true && !payload.remote_model && !payload.remote_host ? payload.message?.content : undefined);
+  if (typeof raw !== 'string') throw new ModelFailure({ provider: config.provider, code: 'invalid_output' });
+  return JSON.parse(raw);
+}
+
+export function createModel(config: ModelConfig, claudeEndpoint = 'https://api.anthropic.com/v1/messages'): Model {
+  return {
+    async run(phase, prompt, _id, timeoutMs = 120000) {
+      try {
+        const input = redact(prompt);
+        const output = config.provider === 'codex'
+          ? await codex(config, phase, input, timeoutMs)
+          : await httpModel(config, phase, input, timeoutMs, claudeEndpoint);
+        return phaseSchemas[phase].parse(output);
+      } catch (error) {
+        if (error instanceof TypeError) throw new ModelFailure({ provider: config.provider, code: 'unavailable' });
+        throw new ModelFailure(failureInfo(error, config.provider));
+      }
+    },
+  };
+}
