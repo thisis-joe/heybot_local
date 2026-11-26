@@ -7,6 +7,7 @@ import { safePath, Sha, type Snapshot } from './contracts.js';
 import { globMatch, readPolicy, policyVersion, type Policy } from './policy.js';
 import { parsePatch, parsePositions, type ReviewContext } from './review.js';
 import type { Platform } from './platform.js';
+import { repositoryWebBase } from './config.js';
 import { redact } from './redact.js';
 
 const defaults = ['**/node_modules/**', '**/dist/**', '**/build/**', '**/vendor/**', '**/generated/**', '**/*.min.js', '**/*.map', '**/*.lock', '**/package-lock.json', '**/pnpm-lock.yaml', '**/yarn.lock'];
@@ -51,9 +52,7 @@ export class Workspaces {
     const key = createHash('sha256').update(`${snapshot.instance}:${snapshot.repository}`).digest('hex');
     const cache = join(this.root, 'cache', key); await mkdir(cache, { recursive: true, mode: 0o700 });
     await git(cache, ['init', '--bare', '--template=', '-q']);
-    const instance = new URL(provider.config.instance);
-    const origin = instance.hostname === 'api.github.com' ? 'https://github.com' : `${instance.origin}${provider.config.platform === 'github' ? '' : instance.pathname.replace(/\/$/, '')}`;
-    const remote = `${origin}/${snapshot.repository}.git`;
+    const remote = `${repositoryWebBase(provider.config)}/${snapshot.repository}.git`;
     const basic = Buffer.from(`${snapshot.platform === 'github' ? 'x-access-token' : 'oauth2'}:${await provider.token()}`).toString('base64');
     const sourceRef = snapshot.platform === 'github' ? `refs/pull/${snapshot.number}/head` : `refs/merge-requests/${snapshot.number}/head`;
     await git(cache, ['-c', 'protocol.file.allow=never', '-c', 'http.followRedirects=false', 'fetch', '--no-tags', '--no-recurse-submodules', remote, sourceRef, snapshot.headSha, snapshot.startSha, snapshot.baseSha], {

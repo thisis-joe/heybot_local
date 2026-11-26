@@ -6,6 +6,11 @@ export class ApiClient {
   constructor(readonly base: string, readonly platform: 'github' | 'gitlab', readonly token: TokenSource,
     private blockedUntil = 0, private readonly onLimit?: (retryAt: number) => void) {}
   async request(path: string, method = 'GET', body?: unknown, asText = false): Promise<any> {
+    const response = await this.send(path, method, body);
+    const text = await boundedText(response, 12 * 1024 * 1024);
+    return asText ? text : text ? JSON.parse(text) : null;
+  }
+  private async send(path: string, method = 'GET', body?: unknown): Promise<Response> {
     if (!path.startsWith('/') || path.startsWith('//')) throw new Error('Invalid API path');
     if (Date.now() < this.blockedUntil) throw new HttpError(429, 'Platform API rate limited', this.blockedUntil);
     const url = new URL(`${this.base}${path}`);
@@ -29,8 +34,26 @@ export class ApiClient {
       await response.body?.cancel();
       throw new HttpError(response.status, `Platform API ${method} failed (${response.status})`, retryAt);
     }
-    const text = await boundedText(response, 12 * 1024 * 1024);
-    return asText ? text : text ? JSON.parse(text) : null;
+    return response;
+  }
+  /** GitHub's activity feed paginates with opaque cursors, even for repository paths. */
+  async *cursorItems(path: string, maxPages = 100): AsyncGenerator<any> {
+    const query = `${path}${path.includes('?') ? '&' : '?'}per_page=100`;
+    const seen = new Set<string>();
+    let after = '';
+    for (let page = 0; page < maxPages; page++) {
+      const response = await this.send(query + (after ? `&after=${encodeURIComponent(after)}` : ''));
+      const values = JSON.parse(await boundedText(response, 12 * 1024 * 1024));
+      if (!Array.isArray(values)) throw new Error('Expected paginated API array');
+      yield* values;
+      const next = response.headers.get('link')?.match(/<([^>]+)>;\s*rel="next"/i)?.[1];
+      if (!next) return;
+      after = new URL(next, this.base).searchParams.get('after') ?? '';
+      if (!after || seen.has(after)) throw new Error('Invalid activity pagination cursor');
+      // Only copy the cursor. The next request always uses our original repository endpoint.
+      seen.add(after);
+    }
+    throw new Error('API pagination exceeds limit; refusing incomplete state');
   }
   async page(path: string, page: number, size = 100): Promise<any[]> {
     const value = await this.request(`${path}${path.includes('?') ? '&' : '?'}per_page=${size}&page=${page}`);

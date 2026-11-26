@@ -46,8 +46,6 @@ export const RepositorySchema = z.strictObject({
 }).superRefine((repo, ctx) => {
   if (repo.platform === 'github' && repo.repository.split('/').length !== 2)
     ctx.addIssue({ code: 'custom', message: 'GitHub 저장소 경로는 owner/repo 형식이어야 합니다.' });
-  if (repo.platform !== 'gitlab' && repo.notifications)
-    ctx.addIssue({ code: 'custom', message: '협업 도구 알림은 GitLab에서 지원합니다.' });
   if (repo.notifications?.channel && repo.notifications.provider !== 'mattermost')
     ctx.addIssue({ code: 'custom', message: '--notify-channel은 Mattermost에서 사용할 수 있습니다.' });
 });
@@ -62,6 +60,15 @@ export type Config = z.infer<typeof ConfigSchema>;
 export const home = () => resolve(process.env.HEYBOT_HOME || join(homedir(), '.heybot_local'));
 export const repositoryKey = (repo: Pick<RepositoryConfig, 'platform' | 'instance' | 'repository'>) =>
   JSON.stringify([repo.platform, repo.instance, repo.repository.toLowerCase()]);
+export function repositoryWebBase(target: Pick<RepositoryConfig, 'platform' | 'instance'>): string {
+  const url = new URL(target.instance);
+  if (target.platform === 'github') {
+    if (url.hostname === 'api.github.com') url.hostname = 'github.com';
+    else if (url.hostname.startsWith('api.') && url.hostname.endsWith('.ghe.com')) url.hostname = url.hostname.slice(4);
+    url.pathname = url.pathname.replace(/\/api\/v3\/?$/, '');
+  }
+  return url.href.replace(/\/$/, '');
+}
 export const sameLogin = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 export async function readConfig(dir: string): Promise<Config> {

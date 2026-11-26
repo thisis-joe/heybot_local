@@ -10,6 +10,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { initialQuestions, answerKey } from './fixtures.mjs';
+import { repositoryWebBase } from '../dist/config.js';
+import { renderNotification } from '../dist/notifications.js';
 
 const execFile = promisify(execFileCallback);
 async function makeGitFixture(dir, gitlab = false) {
@@ -34,14 +36,15 @@ async function makeGitFixture(dir, gitlab = false) {
   return { base, head, objects: join(repo, '.git') };
 }
 const safeToken = 'fixture-forge-token';
-export async function localFixture(t, kind, command = [process.execPath, new URL('../dist/cli.js', import.meta.url).pathname]) {
+const defaultCommand = process.env.HEYBOT_PACKED_BIN ? [process.env.HEYBOT_PACKED_BIN] : [process.execPath, new URL('../dist/cli.js', import.meta.url).pathname];
+export async function localFixture(t, kind, command = defaultCommand) {
   const gitlab = kind === 'gitlab';
   const dir = await mkdtemp(join(tmpdir(), 'heybot-http-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const { base, head, objects } = await makeGitFixture(dir, gitlab);
   let nextNote = 1;
   const general = [], review = [], modelCalls = [], statuses = [], requests = [], notices = [], transitions = [], pushes = [];
-  let updated = '2025-01-01T00:00:00.000Z', created = updated, merged = null, state = gitlab ? 'opened' : 'open', lost = false, lostNotification = false, limited = false;
+  let updated = '2025-01-01T00:00:00.000Z', created = updated, merged = null, state = gitlab ? 'opened' : 'open', lost = false, lostNotification = false, limited = false, activityUnavailable = false;
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url, origin);
@@ -71,12 +74,12 @@ export async function localFixture(t, kind, command = [process.execPath, new URL
         return json({ done: true, message: { content: JSON.stringify({ questions: initialQuestions() }) } });
       }
       assert.equal(gitlab ? req.headers['private-token'] : req.headers.authorization, gitlab ? safeToken : `Bearer ${safeToken}`);
-      requests.push([req.method, path, Number(url.searchParams.get('page') || 1)]);
+      requests.push([req.method, path, Number(url.searchParams.get('page') || 1), url.searchParams.get('after')]);
       const page = Number(url.searchParams.get('page') || 1), per = Number(url.searchParams.get('per_page') ?? 100);
       const paginated = rows => json(rows.slice((page - 1) * per, page * per));
       const pull = { number: 1, iid: 1, state, created_at: created, updated_at: updated, merged_at: merged, title: '결제', body: '결제 변경', description: '결제 변경',
         head: { sha: head }, base: { sha: base }, merged: Boolean(merged), merge_commit_sha: head, html_url: `${origin}/owner/repo/pull/1`, web_url: `${origin}/owner/repo/-/merge_requests/1`,
-        diff_refs: { head_sha: head, base_sha: base, start_sha: base }, author: { username: 'owner', name: 'Owner' } };
+        diff_refs: { head_sha: head, base_sha: base, start_sha: base }, user: { login: 'owner' }, author: { username: 'owner', name: 'Owner' } };
       if (path === '/user' || path === '/api/v4/user') return json({ login: 'owner', username: 'owner', id: 3 });
       if (path === '/api/v4/users') return json([{ id: 3, username: 'owner' }]);
       const root = gitlab ? '/api/v4/projects/owner%2Frepo' : '/repos/owner/repo';
@@ -90,7 +93,24 @@ export async function localFixture(t, kind, command = [process.execPath, new URL
         return paginated(!after || Date.parse(updated) >= Date.parse(after) ? [pull] : []);
       }
       if (route === (gitlab ? '/merge_requests/1' : '/pulls/1')) return json(pull);
-      if (route.startsWith('/compare/')) return json({ merge_base_commit: { sha: base } });
+      if (route.startsWith('/compare/')) {
+        if (!url.searchParams.has('per_page')) return json({ merge_base_commit: { sha: base } });
+        if (route.includes('e'.repeat(40))) return json({ message: 'old object unreachable' }, 404);
+        return json({ total_commits: 2, commits: [
+          { sha: head, commit: { message: 'fix: 결제 처리', committer: { date: updated } }, parents: [{ sha: base }] },
+          { sha: '9'.repeat(40), commit: { message: '병합 개수 제외', committer: { date: updated } }, parents: [{ sha: base }, { sha: head }] },
+        ] });
+      }
+      if (route === '/activity') {
+        if (activityUnavailable) return json({ message: 'activity endpoint unavailable' }, 404);
+        const start = Number(url.searchParams.get('after')?.split('+')[1] ?? 0);
+        const entries = pushes.toReversed();
+        if (start + 2 < entries.length) {
+          res.setHeader('link', `<${origin}/repositories/123/activity?after=fixture%2B${start + 2}>; rel="next"`);
+        }
+        return json(entries.slice(start, start + 2));
+      }
+      if (route === '/issues/1/timeline') return paginated(transitions);
       if (route.endsWith('/status')) return json({ statuses: statuses.map(status => ({ ...status, context: status.context })).slice(-1) });
       if (route === `/commits/${head}`) return json({ parents: [{ sha: base }] });
       if (route === `/repository/commits/${head}/statuses`) return paginated(statuses.map((s, i) => ({ ...s, status: s.state, id: i + 1 })));
@@ -160,23 +180,34 @@ export async function localFixture(t, kind, command = [process.execPath, new URL
   const cli = cliWith();
   const transition = status => {
     updated = new Date().toISOString();
-    if (gitlab) transitions.push({ id: transitions.length + 1, state: status, created_at: updated });
+    transitions.push({ id: transitions.length + 1, state: status, event: status === 'open' ? 'reopened' : status, created_at: updated });
     state = status;
   };
   return { cli, cliWith, env, dir, origin, general, review, statuses, requests, modelCalls, notices,
     open: () => transition(gitlab ? 'opened' : 'open'),
     create: () => { created = updated = new Date().toISOString(); state = gitlab ? 'opened' : 'open'; },
     close: () => transition('closed'),
-    push: (action, ref = 'main') => pushes.push({ id: pushes.length + 1, created_at: new Date().toISOString(),
-      author: { name: '이개발 (팀)' }, push_data: action === 'bulk' ? { ref_count: 3 } : {
-        action, ref_type: 'branch', ref, commit_count: 2, commit_from: action === 'created' ? null : base,
-        commit_to: action === 'removed' ? null : head,
-      } }),
-    merge: () => { updated = merged = new Date().toISOString(); state = gitlab ? 'merged' : 'closed'; },
+    push: (action, ref = 'main') => {
+      const id = pushes.length + 1, created_at = new Date().toISOString();
+      const activityTypes = { created: 'branch_creation', removed: 'branch_deletion', force: 'force_push', merged: 'pr_merge' };
+      pushes.push(gitlab ? {
+        id, created_at, author: { name: '이개발 (팀)' }, push_data: action === 'bulk' ? { ref_count: 3 } : {
+          action, ref_type: 'branch', ref, commit_count: 2, commit_from: action === 'created' ? null : base,
+          commit_to: action === 'removed' ? null : head,
+        },
+      } : { id, timestamp: created_at, activity_type: activityTypes[action] ?? 'push', ref: ref.startsWith('refs/') ? ref : `refs/heads/${ref}`,
+        before: action === 'created' ? '0'.repeat(40) : action === 'force' ? 'e'.repeat(40) : base,
+        after: action === 'removed' ? '0'.repeat(40) : head, actor: { login: 'owner' } });
+    },
+    merge: () => {
+      updated = merged = new Date().toISOString();
+      state = gitlab ? 'merged' : 'closed';
+      if (!gitlab) for (const event of ['merged', 'closed']) transitions.push({ id: transitions.length + 1, event, created_at: updated });
+    },
     oldMerge: () => { state = gitlab ? 'merged' : 'closed'; merged = updated; },
     note: (body, author) => add(general, body, null, author),
     reply: (root, body) => add(review, body, root.id, 'owner', root.discussion_id),
-    loseWrite: () => { lost = true; }, loseNotification: () => { lostNotification = true; }, rateLimit: () => { limited = true; } };
+    disableActivity: () => { activityUnavailable = true; }, loseWrite: () => { lost = true; }, loseNotification: () => { lostNotification = true; }, rateLimit: () => { limited = true; } };
 }
 
 export async function runFlow(t, platform, bin) {
@@ -215,11 +246,11 @@ export async function runFlow(t, platform, bin) {
 }
 
 test('GitHub CLI discovers a merge and both comment surfaces across restarts', async t => {
-  await runFlow(t, 'github', process.env.HEYBOT_PACKED_BIN ? [process.env.HEYBOT_PACKED_BIN] : undefined);
+  await runFlow(t, 'github');
 });
 
 test('GitLab CLI discovers an MR merge and notes and discussion replies on a merged MR', async t => {
-  await runFlow(t, 'gitlab', process.env.HEYBOT_PACKED_BIN ? [process.env.HEYBOT_PACKED_BIN] : undefined);
+  await runFlow(t, 'gitlab');
 });
 
 test('a paginated scan preserves its cursor when rate limited and resumes after reset', async t => {
@@ -326,10 +357,10 @@ test('GitLab notifications cover lifecycle, people, questions, pushes and new br
   assert.ok(JSON.parse((await f.cli('status')).stdout).notifications.some(row => row.state === 'skipped' && row.count === 1));
 });
 
-for (const provider of ['slack', 'discord', 'webhook']) {
-  test(`${provider} is selectable and safely sends the provider's webhook payload`, async t => {
-    const f = await localFixture(t, 'gitlab');
-    await f.cli('connect', 'gitlab', 'owner/repo', '--publisher', 'owner', '--instance', f.origin, '--notify', provider, '--notify-url-env', 'FIXTURE_WEBHOOK');
+for (const forge of ['github', 'gitlab']) for (const provider of ['slack', 'discord', 'webhook']) {
+  test(`${forge} ${provider} is selectable and safely sends the provider's webhook payload`, async t => {
+    const f = await localFixture(t, forge);
+    await f.cli('connect', forge, 'owner/repo', '--publisher', 'owner', '--instance', f.origin, '--notify', provider, '--notify-url-env', 'FIXTURE_WEBHOOK');
     await f.cli('model', 'ollama', '--model', 'fixture', '--url', f.origin);
     await f.cli('watch', '--once');
     f.note('댓글 <@everyone> & 그대로');
@@ -348,8 +379,76 @@ for (const provider of ['slack', 'discord', 'webhook']) {
     } else {
       assert.equal(payload.version, 1);
       assert.equal(payload.event, 'commented');
-      assert.equal(payload.mergeRequest, 1);
+      assert.equal(payload[forge === 'github' ? 'pullRequest' : 'mergeRequest'], 1);
       assert.ok(JSON.parse((await f.cli('status')).stdout).notifications.some(row => row.state === 'uncertain'));
     }
   });
 }
+
+test('GitHub sends PR lifecycle, both comment surfaces, question, commit range and branch alerts exactly once', async t => {
+  const f = await localFixture(t, 'github');
+  f.push('created', 'historical');
+  await f.cli('connect', 'github', 'owner/repo', '--publisher', 'owner', '--instance', f.origin,
+    '--notify', 'mattermost', '--notify-url-env', 'FIXTURE_WEBHOOK');
+  await f.cli('model', 'ollama', '--model', 'fixture', '--url', f.origin);
+  await f.cli('watch', '--once');
+  assert.equal(f.notices.length, 0);
+  f.create();
+  await f.cli('watch', '--once');
+  f.close();
+  f.open();
+  f.note('일반 PR 댓글 @everyone');
+  f.note('일반 이슈 댓글').issue_url = `${f.origin}/repos/owner/repo/issues/999`;
+  f.reply({ id: null }, '리뷰 댓글');
+  f.push('pushed');
+  f.push('created', 'topic/new');
+  f.push('removed', 'gone');
+  f.push('merged');
+  f.push('pushed', 'refs/tags/v1');
+  f.push('force', 'rewritten');
+  await f.cli('watch', '--once');
+  assert.equal(f.modelCalls.length, 0);
+  f.merge();
+  await f.cli('watch', '--once');
+  await f.cli('watch', '--once');
+  assert.equal(f.modelCalls.length, 1);
+  const texts = f.notices.map(payload => payload.text);
+  assert.equal(texts.length, 10);
+  for (const emoji of ['📬', '🗃️', '🔄', '🎉', '🧩', '🌱']) assert.equal(texts.filter(text => text.includes(emoji)).length, 1);
+  assert.ok(texts.some(text => /일반 PR 댓글/.test(text) && /\/pull\/1#issuecomment-/.test(text)));
+  assert.ok(texts.some(text => /리뷰 댓글/.test(text) && /\/pull\/1#discussion_r/.test(text)));
+  assert.ok(texts.some(text => /신규\/변경 커밋 1개/.test(text) && /fix:.*결제 처리/.test(text)));
+  assert.ok(texts.some(text => /커밋 수 확인 필요/.test(text) && /rewritten/.test(text)));
+  const all = texts.join('\n');
+  assert.doesNotMatch(all, /일반 이슈 댓글|@everyone|historical|병합 개수 제외|refs\/tags/);
+  assert.match(all, /\/owner\/repo\/commits\/topic%2Fnew/);
+  assert.match(all, /질문이 준비됐어요\.[\s\S]*?\/pull\/1#issuecomment-/);
+  assert.ok(f.requests.some(([, path, , after]) => path === '/repos/owner/repo/activity' && after === 'fixture+2'));
+  assert.ok(JSON.parse((await f.cli('status')).stdout).notifications.some(row => row.state === 'sent' && row.error === 'range_unavailable'));
+});
+
+test('an unavailable GitHub activity feed leaves merge questions and other notifications working', async t => {
+  const f = await localFixture(t, 'github');
+  await f.cli('connect', 'github', 'owner/repo', '--publisher', 'owner', '--instance', f.origin, '--notify', 'webhook', '--notify-url-env', 'FIXTURE_WEBHOOK');
+  await f.cli('model', 'ollama', '--model', 'fixture', '--url', f.origin);
+  await f.cli('watch', '--once');
+  f.disableActivity();
+  f.merge();
+  await assert.rejects(f.cli('watch', '--once'), /협업 알림 이벤트 조회 실패.*404/);
+  assert.equal(f.modelCalls.length, 1);
+  assert.deepEqual(f.notices.map(item => item.event).sort(), ['merged', 'questions']);
+});
+
+test('notification and Git browser URLs use the web hosts for common enterprise API endpoints', () => {
+  for (const [instance, expected] of [
+    ['https://api.github.com', 'https://github.com'],
+    ['https://api.example.ghe.com', 'https://example.ghe.com'],
+    ['https://github.example.com/api/v3', 'https://github.example.com'],
+  ]) {
+    const target = { platform: 'github', instance, repository: 'owner/repo', number: 5 };
+    assert.equal(repositoryWebBase(target), expected);
+    const text = renderNotification(target, { kind: 'commented', noteId: '3', title: 'Fixture', surface: 'review' }, 'user');
+    assert.ok(text.includes(`${expected}/owner/repo/pull/5#discussion_r3`));
+  }
+  assert.equal(repositoryWebBase({ platform: 'gitlab', instance: 'https://git.example.com/gitlab' }), 'https://git.example.com/gitlab');
+});

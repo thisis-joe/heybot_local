@@ -1,4 +1,4 @@
-import { credential, loopback, repositoryKey, trustedUrl, type NotificationProvider } from './config.js';
+import { credential, loopback, repositoryKey, repositoryWebBase, trustedUrl, type NotificationProvider } from './config.js';
 import { createHash } from 'node:crypto';
 import type { Target, Report } from './contracts.js';
 import { hasChangeQuestions } from './contracts.js';
@@ -9,10 +9,10 @@ import { HttpError } from './http-client.js';
 import { redact } from './redact.js';
 
 type PushCommit = { id: string; subject: string; timestamp: number | null; parentCount?: number };
-export type Notification = { kind: 'opened' | 'reopened' | 'merged' | 'closed'; title: string }
+export type Notification = { kind: 'opened' | 'reopened' | 'merged' | 'closed'; title: string; author?: string }
   | { kind: 'questions'; title: string; count: number; noteId: string; partial?: boolean }
-  | { kind: 'commented'; title: string; noteId: string; author?: string; preview?: string }
-  | { kind: 'push'; branch: string; count: number; author: string; before: string; after: string; commits?: PushCommit[] };
+  | { kind: 'commented'; title: string; noteId: string; surface?: 'issue' | 'review'; author?: string; preview?: string }
+  | { kind: 'push'; branch: string; count?: number; author: string; before: string; after: string; commits?: PushCommit[] };
 // Store subjects, ordering and parent counts; never trust webhook-provided URLs.
 function pushCommits(values: unknown): PushCommit[] {
   if (!Array.isArray(values)) return [];
@@ -37,38 +37,43 @@ export function givenName(display: string): string {
 }
 
 export function renderNotification(target: Target, notification: Notification, author: string): string {
-  const project = `${target.instance}/${target.repository.split('/').map(encodeURIComponent).join('/')}`;
+  const github = target.platform === 'github';
+  const project = `${repositoryWebBase(target)}/${target.repository.split('/').map(encodeURIComponent).join('/')}`;
+  const type = github ? 'PR' : 'MR';
   if (notification.kind === 'push') {
     const who = plain(givenName(notification.author)), branch = plain(redact(notification.branch));
     const created = /^0+$/.test(notification.before);
-    const link = created ? `${project}/-/commits/${encodeURIComponent(notification.branch).replace(/[()]/g, c => c === '(' ? '%28' : '%29')}` : `${project}/-/compare/${notification.before}...${notification.after}`;
+    const history = github ? project : `${project}/-`;
+    const branchPath = encodeURIComponent(notification.branch).replace(/[()]/g, c => c === '(' ? '%28' : '%29');
+    const link = created ? `${history}/commits/${branchPath}` : `${history}/compare/${notification.before}...${notification.after}`;
     const commits = notification.commits ?? [];
-    const classified = commits.length === notification.count && commits.every(c => c.parentCount !== undefined);
+    const classified = notification.count !== undefined && commits.length === notification.count && commits.every(c => c.parentCount !== undefined);
     const merges = commits.filter(c => c.parentCount !== undefined && c.parentCount > 1).length;
-    const counts = classified ? `신규/변경 커밋 ${notification.count - merges}개` : '신규/변경 커밋 수 확인 필요';
+    const counts = classified ? `신규/변경 커밋 ${(notification.count ?? 0) - merges}개` : '신규/변경 커밋 수 확인 필요';
     const headline = created ? `**${who}**님의 **새 브랜치가 생겼어요.** 🌱` : `**${who}**님의 **${counts}**가 올라왔어요. 🚀`;
     const lines = created ? [] : [...commits].filter(c => c.parentCount !== undefined && c.parentCount <= 1)
       .sort((a, b) => (a.timestamp ?? Infinity) - (b.timestamp ?? Infinity))
       .map(c => {
         const match = /^([a-zA-Z]+(?:\([^\r\n]*?\))?!?:)\s+(.+)$/.exec(c.subject);
         const label = match ? `*${plain(match[1]!)}* **${plain(match[2]!)}**` : `**${plain(c.subject)}**`;
-        return `- [${label}](${project}/-/commit/${c.id})`;
+        return `- [${label}](${history}/commit/${c.id})`;
       });
     return `${headline}\n[**${branch}**](${link})${lines.length ? '\n\n' + lines.join('\n') : ''}`;
   }
-  const url = `${project}/-/merge_requests/${target.number}`;
-  const link = 'noteId' in notification ? `${url}#note_${notification.noteId}` : url;
-  const who = plain(givenName(notification.kind === 'commented' ? notification.author ?? author : author));
+  const url = github ? `${project}/pull/${target.number}` : `${project}/-/merge_requests/${target.number}`;
+  const anchor = !github ? 'note_' : notification.kind === 'commented' && notification.surface === 'review' ? 'discussion_r' : 'issuecomment-';
+  const link = 'noteId' in notification ? `${url}#${anchor}${notification.noteId}` : url;
+  const who = plain(givenName(('author' in notification ? notification.author : undefined) ?? author));
   const labels = {
-    questions: `**${who}**님의 MR에 **질문이 준비됐어요.** 🧩`,
-    opened: `**${who}**님이 **새 MR**을 열었어요. 📬`,
-    reopened: `**${who}**님이 **MR을 다시 열었어요.** 🔄`,
-    merged: `**${who}**님의 **MR이 머지됐어요!** 🎉`,
-    closed: `**${who}**님의 **MR이 닫혔어요.** 🗃️`,
-    commented: `**${who}**님이 MR에 **댓글을 남겼어요.** 💬`,
+    questions: `**${who}**님의 ${type}에 **질문이 준비됐어요.** 🧩`,
+    opened: `**${who}**님이 **새 ${type}**을 열었어요. 📬`,
+    reopened: `**${who}**님이 **${type}을 다시 열었어요.** 🔄`,
+    merged: `**${who}**님의 **${type}이 머지됐어요!** 🎉`,
+    closed: `**${who}**님의 **${type}이 닫혔어요.** 🗃️`,
+    commented: `**${who}**님이 ${type}에 **댓글을 남겼어요.** 💬`,
   };
   const preview = notification.kind === 'commented' && notification.preview ? `\n\n*“${plain(redact(notification.preview))}”*` : '';
-  return `${labels[notification.kind]}\n[**MR !${target.number} · ${plain(redact(notification.title).slice(0, 500))}**](${link})${preview}`;
+  return `${labels[notification.kind]}\n[**${type} ${github ? '#' : '!'}${target.number} · ${plain(redact(notification.title).slice(0, 500))}**](${link})${preview}`;
 }
 
 
@@ -78,7 +83,7 @@ export class Notifications {
   constructor(readonly store: Store, platforms: Platform[], readonly transport: typeof fetch = fetch) {
     for (const platform of platforms) {
       const config = platform.config;
-      if (config.platform === 'gitlab' && config.mode === 'publish' && config.notifications)
+      if (config.mode === 'publish' && config.notifications)
         this.destinations.set(repositoryKey(config), platform);
     }
   }
@@ -137,23 +142,26 @@ export class Notifications {
       this.store.db.prepare("UPDATE notifications SET error='destination_unavailable',due=? WHERE key=?").run(Date.now() + 60000, key);
       return;
     }
-    let author = '';
+    let author = '', rangeUnavailable = false;
     try {
       if (notification.kind === 'push' && !/^0+$/.test(notification.before)) {
-        const compare = await platform.api.request(`${platform.root}/repository/compare?from=${notification.before}&to=${notification.after}&straight=true`);
-        const commits = pushCommits(compare?.commits);
-        if (compare?.compare_timeout || compare?.overflow || commits.length !== notification.count) throw new Error('Incomplete push range');
-        for (const commit of commits) {
-          if (commit.parentCount !== undefined) continue;
-          const detail = await platform.api.request(`${platform.root}/repository/commits/${commit.id}`);
-          const resolved = pushCommits([detail])[0];
-          if (resolved?.id !== commit.id || resolved.parentCount === undefined) throw new Error('Missing commit parents');
-          commit.parentCount = resolved.parentCount;
+        if (target.platform === 'github') {
+          try {
+            const commits = await githubPushCommits(platform, notification.before, notification.after);
+            notification.commits = commits;
+            notification.count = commits.length;
+          } catch (error) {
+            // A force push can leave one of the old objects unreachable. Keep the branch and link.
+            if (!(error instanceof UnavailableRange) && !(error instanceof HttpError && [404, 409, 422].includes(error.status))) throw error;
+            rangeUnavailable = true;
+          }
+        } else {
+          notification.commits = await gitlabPushCommits(platform, notification);
         }
-        notification.commits = commits;
-      } else if (notification.kind !== 'push' && !(notification.kind === 'commented' && notification.author)) {
-        const mr = await platform.api.request(`${platform.root}/merge_requests/${target.number}`);
-        author = typeof mr.author?.name === 'string' ? mr.author.name : '';
+      } else if (notification.kind !== 'push' && !('author' in notification && notification.author)) {
+        const github = target.platform === 'github';
+        const change = await platform.api.request(`${platform.root}/${github ? 'pulls' : 'merge_requests'}/${target.number}`);
+        author = redact(String(github ? change.user?.login ?? '' : change.author?.name ?? ''));
       }
     } catch (error) {
       if (error instanceof HttpError && error.retryAt)
@@ -166,7 +174,7 @@ export class Notifications {
     try {
       const response = await this.transport(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), redirect: 'error', signal: AbortSignal.timeout(5000) });
       await response.body?.cancel();
-      if (response.ok) settle('sent', null);
+      if (response.ok) settle('sent', rangeUnavailable ? 'range_unavailable' : null);
       else if (response.status === 429 && attempt < 3) {
         const retryAfter = response.headers.get('retry-after');
         const seconds = Number(retryAfter);
@@ -179,6 +187,39 @@ export class Notifications {
   }
 }
 
+
+type PushNotification = Extract<Notification, { kind: 'push' }>;
+class UnavailableRange extends Error {}
+async function githubPushCommits(platform: Platform, before: string, after: string): Promise<PushCommit[]> {
+  const result: PushCommit[] = [];
+  for (let page = 1; page <= 30; page++) {
+    const compare = await platform.api.request(`${platform.root}/compare/${before}...${after}?per_page=100&page=${page}`);
+    if (!Number.isSafeInteger(compare.total_commits) || compare.total_commits < 0 || compare.total_commits > 3000 || !Array.isArray(compare.commits))
+      throw new UnavailableRange('Incomplete GitHub compare');
+    result.push(...pushCommits(compare.commits.map((commit: any) => ({ id: commit.sha, message: commit.commit?.message,
+      committed_date: commit.commit?.committer?.date, parent_ids: commit.parents?.map((parent: { sha: string }) => parent.sha) }))));
+    if (compare.commits.length < 100 || result.length >= compare.total_commits) {
+      if (result.length !== compare.total_commits || new Set(result.map(commit => commit.id)).size !== result.length ||
+          result.some(commit => commit.parentCount === undefined)) throw new UnavailableRange('Incomplete GitHub compare');
+      return result;
+    }
+  }
+  throw new UnavailableRange('GitHub compare pagination limit');
+}
+
+async function gitlabPushCommits(platform: Platform, notification: PushNotification): Promise<PushCommit[]> {
+  const compare = await platform.api.request(`${platform.root}/repository/compare?from=${notification.before}&to=${notification.after}&straight=true`);
+  const commits = pushCommits(compare?.commits);
+  if (compare?.compare_timeout || compare?.overflow || commits.length !== notification.count) throw new Error('Incomplete push range');
+  for (const commit of commits) {
+    if (commit.parentCount !== undefined) continue;
+    const detail = await platform.api.request(`${platform.root}/repository/commits/${commit.id}`);
+    const resolved = pushCommits([detail])[0];
+    if (resolved?.id !== commit.id || resolved.parentCount === undefined) throw new Error('Missing commit parents');
+    commit.parentCount = resolved.parentCount;
+  }
+  return commits;
+}
 
 export function webhookUrl(provider: NotificationProvider, value: string): string {
   const url = new URL(trustedUrl(value));
@@ -215,5 +256,5 @@ export function webhookBody(provider: NotificationProvider, target: Target, noti
     return { text: safe, link_names: 0, unfurl_links: false, unfurl_media: false };
   }
   return { version: 1, id, event: notification.kind, repository: { platform: target.platform, instance: target.instance, path: target.repository },
-    ...(target.number ? { mergeRequest: target.number } : {}), text };
+    ...(target.number ? (target.platform === 'github' ? { pullRequest: target.number } : { mergeRequest: target.number }) : {}), text };
 }

@@ -1,5 +1,5 @@
 import { ApiClient, HttpError, type TokenSource } from './http-client.js';
-import { loopback, sameLogin, type RepositoryConfig } from './config.js';
+import { repositoryWebBase, sameLogin, type RepositoryConfig } from './config.js';
 import { Sha, type Snapshot, type Target, type Candidate } from './contracts.js';
 import type { DiffPosition } from './review.js';
 import { hasOutputMarker } from './events.js';
@@ -38,9 +38,8 @@ export class Platform {
       baseSha = Sha.parse(pr.diff_refs?.base_sha); headSha = Sha.parse(pr.diff_refs?.head_sha); startSha = Sha.parse(pr.diff_refs?.start_sha);
     }
     const webUrl = String(gh ? pr.html_url : pr.web_url);
-    const web = new URL(webUrl), allowed = new URL(this.config.instance);
-    const expectedHost = allowed.hostname === 'api.github.com' ? 'github.com' : allowed.hostname;
-    if ((web.protocol !== 'https:' && !(loopback(allowed) && web.origin === allowed.origin)) || web.hostname !== expectedHost || web.username || web.password) throw new Error('Unexpected PR/MR web URL');
+    const web = new URL(webUrl), base = new URL(repositoryWebBase(this.config));
+    if (web.origin !== base.origin || web.username || web.password) throw new Error('Unexpected PR/MR web URL');
     return { ...this.target(number), baseSha, headSha, startSha, ...(policySha ? { policySha } : {}), merged, policyVersion: 'default', title: String(pr.title ?? '').slice(0, 500), description: String((gh ? pr.body : pr.description) ?? '').slice(0, 20000), webUrl };
   }
   async comments(number: number): Promise<RemoteComment[]> {
