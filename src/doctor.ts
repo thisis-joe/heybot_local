@@ -6,7 +6,7 @@ import { webhookUrl } from './notifications.js';
 import { Platform } from './platform.js';
 import { redact } from './redact.js';
 
-type Level = '확인' | '메타데이터' | '확인 필요' | '실패' | '건너뜀';
+type Level = '확인' | '메타데이터' | '확인 필요' | '실패' | '선택 기능' | '건너뜀';
 type Report = (level: Level, label: string, detail: string) => void;
 type Display = (label: string) => string;
 type Account = Awaited<ReturnType<Platform['account']>>;
@@ -132,12 +132,12 @@ function githubPermissions(account: Account, repo: RepositoryMetadata, report: R
   else if (unknownVisibility) report('확인 필요', '댓글 쓰기', `저장소 공개 여부 확인 필요 · ${writePending}`);
   else report('실패', '댓글 쓰기', 'OAuth 토큰의 저장소 권한 범위 부족');
 
-  if (repo.permissions?.push === false) report('실패', '커밋 상태 쓰기', '저장소 푸시 권한 부족');
+  if (repo.permissions?.push === false) report('선택 기능', '커밋 상태 쓰기', 'requireAnswers에 필요한 저장소 푸시 권한 부족');
   else if (repoScope || scopes.includes('repo:status')) {
     const push = repo.permissions?.push === true ? ' · 저장소 푸시 권한 확인' : ' · 저장소 푸시 권한 조회 불가';
     report('메타데이터', '커밋 상태 쓰기', `OAuth 권한 범위 확인${push} · ${writePending}`);
   } else if (unknownVisibility) report('확인 필요', '커밋 상태 쓰기', `저장소 공개 여부 확인 필요 · ${writePending}`);
-  else report('실패', '커밋 상태 쓰기', 'OAuth 토큰의 커밋 상태 권한 범위 부족');
+  else report('선택 기능', '커밋 상태 쓰기', 'requireAnswers에 필요한 OAuth 커밋 상태 권한 범위 부족');
 }
 
 async function gitlabPermissions(platform: Platform, account: Account, repo: RepositoryMetadata, report: Report): Promise<void> {
@@ -158,7 +158,7 @@ async function gitlabPermissions(platform: Platform, account: Account, repo: Rep
   const access = Math.max(0, ...levels.filter((level): level is number => Number.isInteger(level)));
   report('메타데이터', '댓글 쓰기', `api 권한 범위 확인 · ${writePending}`);
   if (access >= 30) report('메타데이터', '커밋 상태 쓰기', `api 권한 범위와 Developer 이상 역할 확인 · ${writePending}`);
-  else if (Number.isInteger(member?.access_level)) report('실패', '커밋 상태 쓰기', '프로젝트의 Developer 이상 역할 필요');
+  else if (Number.isInteger(member?.access_level)) report('선택 기능', '커밋 상태 쓰기', 'requireAnswers에는 프로젝트의 Developer 이상 역할 필요');
   else report('확인 필요', '커밋 상태 쓰기', `api 권한 범위 확인 · 프로젝트의 Developer 이상 역할 조회 불가 · ${writePending}`);
 }
 

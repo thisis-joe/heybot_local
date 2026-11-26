@@ -44,7 +44,7 @@ export async function localFixture(t, kind, command = defaultCommand) {
   const { base, head, objects } = await makeGitFixture(dir, gitlab);
   let nextNote = 1;
   const general = [], review = [], modelCalls = [], statuses = [], requests = [], notices = [], transitions = [], pushes = [];
-  const access = { login: 'owner', githubScopes: 'repo', gitlabScopes: ['api'], gitlabRole: 30, commitsStatus: 200 };
+  const access = { login: 'owner', githubScopes: 'repo', githubPush: true, gitlabScopes: ['api'], gitlabRole: 30, commitsStatus: 200 };
   let updated = '2025-01-01T00:00:00.000Z', created = updated, merged = null, state = gitlab ? 'opened' : 'open', lost = false, lostNotification = false, limited = false, activityUnavailable = false;
   const server = createServer(async (req, res) => {
     try {
@@ -94,7 +94,7 @@ export async function localFixture(t, kind, command = defaultCommand) {
       const root = gitlab ? '/api/v4/projects/owner%2Frepo' : '/repos/owner/repo';
       if (!path.startsWith(root)) return json({ message: 'not found' }, 404);
       const route = path.slice(root.length);
-      if (!route) return json({ id: 1, private: true, visibility: 'private', permissions: { push: true }, web_url: `${origin}/owner/repo` });
+      if (!route) return json({ id: 1, private: true, visibility: 'private', permissions: { push: access.githubPush }, web_url: `${origin}/owner/repo` });
       if (route === (gitlab ? '/repository/commits' : '/commits')) {
         return access.commitsStatus === 200 ? json([{ [gitlab ? 'id' : 'sha']: head }]) : json({ message: safeToken }, access.commitsStatus);
       }
@@ -309,17 +309,20 @@ for (const forge of ['github', 'gitlab']) {
 
     if (forge === 'github') {
       f.access.githubScopes = 'repo';
+      f.access.githubPush = false;
+      assert.match((await f.cli('doctor')).stdout, /\[선택 기능\] 커밋 상태 쓰기.*푸시 권한 부족/);
       f.access.login = safeToken;
+      await assert.rejects(f.cli('doctor'), error => {
+        assert.equal(error.code, 1);
+        assert.match(error.stdout, /\[실패\] 게시 계정/);
+        assert.ok(!(error.stdout + error.stderr).includes(safeToken));
+        return true;
+      });
     } else {
       f.access.gitlabScopes = ['api'];
       f.access.gitlabRole = 20;
+      assert.match((await f.cli('doctor')).stdout, /\[선택 기능\] 커밋 상태 쓰기.*Developer/);
     }
-    await assert.rejects(f.cli('doctor'), error => {
-      assert.equal(error.code, 1);
-      assert.match(error.stdout, forge === 'github' ? /\[실패\] 게시 계정/ : /\[실패\] 커밋 상태 쓰기.*Developer/);
-      assert.ok(!(error.stdout + error.stderr).includes(safeToken));
-      return true;
-    });
   });
 }
 

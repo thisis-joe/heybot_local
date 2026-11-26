@@ -38,7 +38,7 @@ GitLab은 `GITLAB_TOKEN`을 설정하고 `heybot_local connect gitlab GROUP/PROJ
 
 - **`[확인]`**은 해당 조회나 설정 검사를 통과했다는 뜻입니다. 모델은 Codex CLI의 ChatGPT 로그인, Claude Models API의 키·모델 조회, Ollama의 로컬 모델 설치 여부를 확인합니다. 웹훅은 게시 연결에 설정된 주소의 형식만 검사합니다.
 - **`[메타데이터]`**는 쓰기와 관련된 권한 정보를 조회했다는 뜻입니다. GitHub는 OAuth 범위와 저장소 푸시 권한을, GitLab은 토큰의 `api` 범위와 프로젝트 역할을 사용합니다. `[확인 필요]`는 GitHub fine-grained 토큰처럼 권한 정보가 충분하지 않거나 조회할 수 없는 경우에 표시됩니다. 실제 댓글·커밋 상태 쓰기, 웹훅 수신, 모델 생성은 별도로 확인해야 합니다. 커밋 상태 쓰기는 `requireAnswers`를 사용할 때 필요합니다. [GitHub OAuth 범위](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps) · [GitLab 역할과 권한](https://docs.gitlab.com/user/permissions/)
-- **`[실패]`**가 있으면 종료 코드는 `1`입니다. 메타데이터 부족으로 `[확인 필요]`만 남아 있으면 종료 코드는 `0`입니다. 관찰 모드에서는 게시 계정 일치, 쓰기 권한과 웹훅 검사를 건너뜁니다.
+- **`[실패]`**가 있으면 종료 코드는 `1`입니다. `[확인 필요]`와 `[선택 기능]`은 종료 코드에 영향을 주지 않습니다. `[선택 기능]`은 `requireAnswers`에 필요한 권한 부족을 표시합니다. 관찰 모드에서는 게시 계정 일치, 쓰기 권한과 웹훅 검사를 건너뜁니다.
 
 진단 중에는 포지와 모델 설정을 조회합니다. 댓글 게시, 커밋 상태 갱신, 웹훅 발송, 모델 생성 요청은 수행하지 않습니다.
 
