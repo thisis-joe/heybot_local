@@ -9,7 +9,7 @@ Node.js 22.13 이상(22.x 또는 24 이상), npm, Git이 필요합니다. 감시
 ```sh
 npm install
 npm pack
-npm install -g ./heybot_local-0.2.0.tgz
+npm install -g ./heybot_local-0.3.0.tgz
 
 # 사용자 계정으로 먼저 공식 Codex CLI에 로그인합니다.
 codex login
@@ -142,9 +142,9 @@ heybot_local connect gitlab GROUP/PROJECT --publisher YOUR_GITLAB_LOGIN --notify
 | 협업 알림 | 두 포지에서 변경 요청·댓글·질문·Push·새 브랜치와 네 웹훅 전송 형식을 격리 검증했습니다. 실제 GitHub 저장소의 재열기·닫기·댓글·브랜치 생성·Push 5건도 로컬 수신기에서 확인했습니다. 재조회 시 추가 전송은 0건이었습니다. [테스트 댓글](https://github.com/thisis-joe/heybot_local/pull/2#issuecomment-7186672328) · [테스트 브랜치](https://github.com/thisis-joe/heybot_local/tree/verify/heybot-local-notifications) |
 | 알림 제어 | GitHub·GitLab 격리 CLI에서 이벤트 선택, 재활성화와 중복 방지, 댓글 미리보기의 대기열 제거, 질문 게시와 댓글 명령을 확인했습니다. |
 
-실연동은 공개 `heybot_local` 저장소의 테스트 브랜치와 합성 코드에 한정했습니다.
+실연동은 공개 `heybot_local` 저장소의 테스트 브랜치와 합성 코드에 한정했습니다. `doctor`에서도 이 저장소에 대한 실제 인증, 읽기, 권한 메타데이터와 Codex 로그인 조회를 확인했습니다.
 
-### 0.2.0 운영체제·사내 포지 검증 (2026-11-26)
+### 운영체제·사내 포지 검증 (2026-11-26)
 
 | 대상 | 확인 결과 |
 | --- | --- |
@@ -164,7 +164,7 @@ HEYBOT_TEST_TLS=1 npm test
 npm pack
 scratch="$(mktemp -d)"
 prefix="$scratch/HeyBot 검증"
-npm install -g --prefix "$prefix" ./heybot_local-0.2.0.tgz
+npm install -g --prefix "$prefix" ./heybot_local-0.3.0.tgz
 "$prefix/bin/heybot_local" --help
 HEYBOT_TEST_TLS=1 HEYBOT_PACKED_BIN="$prefix/bin/heybot_local" node --test test/local-flow.test.mjs
 rm -rf -- "$scratch"
@@ -179,7 +179,7 @@ npm.cmd ci
 npm.cmd test
 npm.cmd pack
 $prefix = Join-Path ([IO.Path]::GetTempPath()) ("HeyBot 검증 " + [guid]::NewGuid())
-npm.cmd install -g --prefix $prefix .\heybot_local-0.2.0.tgz
+npm.cmd install -g --prefix $prefix .\heybot_local-0.3.0.tgz
 $bin = Join-Path $prefix 'heybot_local.cmd'
 & $bin --help
 $env:HEYBOT_PACKED_CLI = Join-Path $prefix 'node_modules\heybot_local\dist\cli.js'

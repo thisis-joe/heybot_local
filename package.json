@@ -1,6 +1,6 @@
 {
   "name": "heybot_local",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "GitHub과 GitLab을 위한 로컬 학습 질문 봇",
   "private": true,
   "type": "module",
