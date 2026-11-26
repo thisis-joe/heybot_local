@@ -9,7 +9,7 @@
 | 답변과 해설 | connections 질문 댓글별 해설, `learning-command.ts`, `question-thread.ts`, `render.ts`, `thread-reveal`·`basic-explanations`·`learning` 테스트 | 댓글 스레드 식별자를 보존. GitHub 일반 댓글은 최상위 게시. GitLab은 토론의 답변 경로 사용 | `/hey answer`, 기존 Q 해시 ID, 번호, 복수 문항과 이유 채점, 보기 한 글자, `/hey showanswer`의 스레드 범위와 구버전 거부 |
 | 추가 학습과 질문 | README CS 기술 면접, `csinterview.ts`, `whatelse.ts`, `controller.ts`, `commands`·`morecs`·`csinterview` 테스트 | 권한 있는 댓글에서 `whatelse`, `csinterview`, `morecs`, `tryagain`, `@hey`. 같은 버전에 출제 이력 보존 | 추가 질문과 면접/꼬리 번호, 재생성, 근거 위치 검증, 게시 재시도에서 저장 결과 재사용 |
 | 정책과 답변 상태 | README 저장소 설정, connections 답변 완료 후 머지, `policy.ts`, `answer-gate.ts`, `answer-gate` 테스트 | 대상의 고정 기준 SHA에서 `.hey.yaml` 읽기. Commit statuses 쓰기/GitLab Developer 이상 | 현재 커밋에 필요한 답변 수를 상태로 쓰고 답변 완료 시 성공. 머지 전에는 명시적 `tryagain`으로 출제 요청 가능 |
-| GitLab Mattermost | operations Mattermost, `mattermost.ts`, `mattermost` 테스트 | MR 목록과 상태 이력, notes/discussions, 질문 게시 큐, project events의 branch push, compare/commit 읽기. 개인 설정의 Incoming Webhook | 열기·재열기·머지·닫기, 사람 댓글과 질문 준비, Push·새 브랜치 메시지. 누락된 push 범위는 분리 집계 |
+| GitHub·GitLab 협업 알림 | operations Mattermost, `mattermost.ts`, `mattermost` 테스트 | GitHub PR 목록·타임라인·일반/리뷰 댓글·저장소 활동. GitLab MR 목록·상태 이력·노트/디스커션·프로젝트 이벤트. 양쪽에서 질문 게시 큐와 커밋 비교를 사용한다. 개인 설정의 Mattermost·Slack·Discord·일반 웹훅 | 열기·재열기·머지·닫기, 사람 댓글과 질문 준비, Push·새 브랜치 메시지. 누락된 push 범위는 분리 집계 |
 | 재시작 및 게시 책임 | operations 중복과 장애, `store.ts`, `publish.test.mjs` | 로컬 SQLite 트랜잭션으로 커서와 큐를 함께 확정. 인증 계정 검사와 저장소마다 지정 PC 한 대만 게시. 동일 프로필 동시 실행 잠금 | 페이지 경계, 429, 중단 후 재개, 쓰기 응답 유실 후 마커 대조. 같은 계정의 사람 명령과 출력 구분 |
 | 모델 선택 | connections 모델 연결, `codex.ts`, `claude.ts`, `contracts.ts` | 공식 Codex CLI의 사용자 로그인, Claude 공식 Messages API 키, 로컬 Ollama 구조화 출력. 선택된 어댑터만 호출 | 각 어댑터의 구조화 결과와 실패 검사. 인증된 제공자 또는 실저장소 증거가 없는 항목은 README에 남김 |
 
@@ -25,3 +25,7 @@
 ## 인수 기준
 
 설치된 tarball의 CLI에서 connect, model, watch, status가 동작해야 한다. 같은 설치의 격리 서버에서 머지부터 답변과 해설까지 확인하고, 플랫폼·모델별 실검증 여부를 README에 표기한다. 런타임은 Node와 로컬 저장 공간을 사용한다. 별도의 서버, 공개 웹훅, DB 서비스나 npm 공개 발행은 필요하지 않다.
+
+알림은 저장소별 선택 기능이다. Mattermost는 기존 형식을 유지하고 Slack, Discord, 일반 웹훅도 선택할 수 있다. 사용자가 제공한 웹훅 환경 변수로 설정하며, 개발 검증에는 격리된 수신기를 사용한다. [Slack](https://api.slack.com/messaging/webhooks) · [Discord](https://docs.discord.com/developers/resources/webhook)
+
+GitHub 알림은 PR 열기·재열기·머지·닫기, 일반·리뷰 댓글, 질문 준비, 브랜치 Push·생성을 지원한다. 실제 PR 머지만 자동 출제의 신호다. 활동 API의 커서 페이지와 커밋 범위를 분리해 조회한다. PR 머지와 머지 큐의 활동은 PR 머지 알림으로 처리한다. GitLab 기존 출력과 웹훅 JSON의 `mergeRequest` 필드는 유지한다. GitHub 웹훅에서는 `pullRequest`와 브라우저용 링크를 보낸다. [GitHub 타임라인](https://docs.github.com/en/rest/issues/timeline) · [GitHub 저장소 활동](https://docs.github.com/en/rest/repos/repos#list-repository-activities)

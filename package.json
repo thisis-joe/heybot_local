@@ -1,0 +1,52 @@
+{
+  "name": "heybot_local",
+  "version": "0.3.0",
+  "description": "GitHub과 GitLab을 위한 로컬 학습 질문 봇",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  },
+  "bin": {
+    "heybot_local": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "docs/specs/heybot-local.md",
+    "docs/plans/heybot-local.md",
+    "docs/operations.md",
+    "docs/verification.md"
+  ],
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"test/*.test.mjs\"",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "yaml": "2.9.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thisis-joe/heybot_local.git"
+  },
+  "homepage": "https://github.com/thisis-joe/heybot_local#readme",
+  "bugs": {
+    "url": "https://github.com/thisis-joe/heybot_local/issues"
+  },
+  "keywords": [
+    "github",
+    "gitlab",
+    "code-review",
+    "learning",
+    "cli"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  }
+}
