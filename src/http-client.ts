@@ -7,6 +7,13 @@ export class ApiClient {
     private blockedUntil = 0, private readonly onLimit?: (retryAt: number) => void) {}
   async request(path: string, method = 'GET', body?: unknown, asText = false): Promise<any> {
     const response = await this.send(path, method, body);
+    return this.readBody(response, asText);
+  }
+  async readWithHeaders(path: string): Promise<{ data: any; headers: Headers }> {
+    const response = await this.send(path);
+    return { data: await this.readBody(response), headers: response.headers };
+  }
+  private async readBody(response: Response, asText = false): Promise<any> {
     const text = await boundedText(response, 12 * 1024 * 1024);
     return asText ? text : text ? JSON.parse(text) : null;
   }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile as execFileCallback } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -44,6 +44,7 @@ export async function localFixture(t, kind, command = defaultCommand) {
   const { base, head, objects } = await makeGitFixture(dir, gitlab);
   let nextNote = 1;
   const general = [], review = [], modelCalls = [], statuses = [], requests = [], notices = [], transitions = [], pushes = [];
+  const access = { login: 'owner', githubScopes: 'repo', gitlabScopes: ['api'], gitlabRole: 30, commitsStatus: 200 };
   let updated = '2025-01-01T00:00:00.000Z', created = updated, merged = null, state = gitlab ? 'opened' : 'open', lost = false, lostNotification = false, limited = false, activityUnavailable = false;
   const server = createServer(async (req, res) => {
     try {
@@ -73,21 +74,32 @@ export async function localFixture(t, kind, command = defaultCommand) {
         assert.doesNotMatch(body.messages[0].content, /SHOULD_NEVER_REACH_MODEL|BASE_POLICY_MUST_EXCLUDE_ME|fixture-forge-token/);
         return json({ done: true, message: { content: JSON.stringify({ questions: initialQuestions() }) } });
       }
-      assert.equal(gitlab ? req.headers['private-token'] : req.headers.authorization, gitlab ? safeToken : `Bearer ${safeToken}`);
       requests.push([req.method, path, Number(url.searchParams.get('page') || 1), url.searchParams.get('after')]);
+      if ((gitlab ? req.headers['private-token'] : req.headers.authorization) !== (gitlab ? safeToken : `Bearer ${safeToken}`)) {
+        return json({ message: `Rejected credentials: ${req.headers['private-token'] ?? req.headers.authorization}` }, 401);
+      }
       const page = Number(url.searchParams.get('page') || 1), per = Number(url.searchParams.get('per_page') ?? 100);
       const paginated = rows => json(rows.slice((page - 1) * per, page * per));
       const pull = { number: 1, iid: 1, state, created_at: created, updated_at: updated, merged_at: merged, title: '결제', body: '결제 변경', description: '결제 변경',
         head: { sha: head }, base: { sha: base }, merged: Boolean(merged), merge_commit_sha: head, html_url: `${origin}/owner/repo/pull/1`, web_url: `${origin}/owner/repo/-/merge_requests/1`,
         diff_refs: { head_sha: head, base_sha: base, start_sha: base }, user: { login: 'owner' }, author: { username: 'owner', name: 'Owner' } };
-      if (path === '/user' || path === '/api/v4/user') return json({ login: 'owner', username: 'owner', id: 3 });
+      if (path === '/user' || path === '/api/v4/user') {
+        if (!gitlab && access.githubScopes !== null) res.setHeader('x-oauth-scopes', access.githubScopes);
+        res.setHeader('x-accepted-github-permissions', 'pull_requests=write, commit_statuses=write');
+        return json({ login: access.login, username: access.login, id: 3 });
+      }
       if (path === '/api/v4/users') return json([{ id: 3, username: 'owner' }]);
+      if (path === '/api/v4/personal_access_tokens/self') return access.gitlabScopes
+        ? json({ scopes: access.gitlabScopes }) : json({ message: 'Metadata endpoint unavailable' }, 404);
       const root = gitlab ? '/api/v4/projects/owner%2Frepo' : '/repos/owner/repo';
       if (!path.startsWith(root)) return json({ message: 'not found' }, 404);
       const route = path.slice(root.length);
-      if (!route) return json({ id: 1, web_url: `${origin}/owner/repo` });
+      if (!route) return json({ id: 1, private: true, visibility: 'private', permissions: { push: true }, web_url: `${origin}/owner/repo` });
+      if (route === (gitlab ? '/repository/commits' : '/commits')) {
+        return access.commitsStatus === 200 ? json([{ [gitlab ? 'id' : 'sha']: head }]) : json({ message: safeToken }, access.commitsStatus);
+      }
       if (route.startsWith('/collaborators/')) return json({ permission: route.includes('/visitor/') ? 'read' : 'write' });
-      if (route === '/members/all/3') return json({ access_level: 30 });
+      if (route === '/members/all/3') return json({ access_level: access.gitlabRole });
       if (route === (gitlab ? '/merge_requests' : '/pulls')) {
         const after = url.searchParams.get('updated_after');
         return paginated(!after || Date.parse(updated) >= Date.parse(after) ? [pull] : []);
@@ -183,7 +195,7 @@ export async function localFixture(t, kind, command = defaultCommand) {
     transitions.push({ id: transitions.length + 1, state: status, event: status === 'open' ? 'reopened' : status, created_at: updated });
     state = status;
   };
-  return { cli, cliWith, env, dir, origin, general, review, statuses, requests, modelCalls, notices,
+  return { cli, cliWith, env, dir, origin, general, review, statuses, requests, modelCalls, notices, access,
     open: () => transition(gitlab ? 'opened' : 'open'),
     create: () => { created = updated = new Date().toISOString(); state = gitlab ? 'opened' : 'open'; },
     close: () => transition('closed'),
@@ -251,6 +263,91 @@ test('GitHub CLI discovers a merge and both comment surfaces across restarts', a
 
 test('GitLab CLI discovers an MR merge and notes and discussion replies on a merged MR', async t => {
   await runFlow(t, 'gitlab');
+});
+
+for (const forge of ['github', 'gitlab']) {
+  test(`doctor reads ${forge} and checks webhook configuration without writing or delivering`, async t => {
+    const f = await localFixture(t, forge);
+    await f.cli('connect', forge, 'owner/repo', '--publisher', 'OWNER', '--instance', f.origin,
+      '--notify', 'webhook', '--notify-url-env', 'FIXTURE_WEBHOOK');
+    await f.cli('model', 'ollama', '--model', 'fixture', '--url', f.origin);
+    const files = await readdir(f.env.HEYBOT_HOME);
+    const config = await readFile(join(f.env.HEYBOT_HOME, 'config.json'), 'utf8');
+    const start = f.requests.length;
+
+    const { stdout, stderr } = await f.cli('doctor');
+    assert.match(stdout, /\[확인\] 토큰.*인증/);
+    assert.match(stdout, /\[확인\] 게시 계정.*일치/);
+    assert.match(stdout, /\[확인\] 저장소 읽기/);
+    assert.match(stdout, /\[메타데이터\] 댓글 쓰기.*실제 쓰기 확인 필요/);
+    assert.match(stdout, /\[메타데이터\] 커밋 상태 쓰기.*실제 쓰기 확인 필요/);
+    assert.match(stdout, /\[확인\] 웹훅.*형식.*수신 확인 필요/);
+    assert.match(stdout, /\[확인\] 모델.*Ollama.*로컬/);
+    assert.ok(!(stdout + stderr).includes(safeToken));
+    assert.ok(!(stdout + stderr).includes(f.env.FIXTURE_WEBHOOK));
+    assert.ok(f.requests.slice(start).every(([method]) => method === 'GET'));
+    assert.ok(f.requests.slice(start).some(([, path]) => path.endsWith('/commits')));
+    assert.equal(f.notices.length, 0);
+    assert.equal(f.modelCalls.length, 0);
+    assert.deepEqual(await readdir(f.env.HEYBOT_HOME), files);
+    assert.equal(await readFile(join(f.env.HEYBOT_HOME, 'config.json'), 'utf8'), config);
+
+    if (forge === 'github') f.access.githubScopes = null;
+    else f.access.gitlabScopes = null;
+    const limitedMetadata = (await f.cli('doctor')).stdout;
+    assert.match(limitedMetadata, /\[확인 필요\] 댓글 쓰기/);
+    assert.match(limitedMetadata, /\[확인 필요\] 커밋 상태 쓰기/);
+
+    if (forge === 'github') f.access.githubScopes = 'repo:status';
+    else f.access.gitlabScopes = ['read_api'];
+    await assert.rejects(f.cli('doctor'), error => {
+      assert.equal(error.code, 1);
+      assert.match(error.stdout, /\[실패\] 댓글 쓰기.*권한 범위/);
+      assert.match(error.stdout, forge === 'github' ? /\[메타데이터\] 커밋 상태 쓰기/ : /\[실패\] 커밋 상태 쓰기.*권한 범위/);
+      return true;
+    });
+
+    if (forge === 'github') {
+      f.access.githubScopes = 'repo';
+      f.access.login = safeToken;
+    } else {
+      f.access.gitlabScopes = ['api'];
+      f.access.gitlabRole = 20;
+    }
+    await assert.rejects(f.cli('doctor'), error => {
+      assert.equal(error.code, 1);
+      assert.match(error.stdout, forge === 'github' ? /\[실패\] 게시 계정/ : /\[실패\] 커밋 상태 쓰기.*Developer/);
+      assert.ok(!(error.stdout + error.stderr).includes(safeToken));
+      return true;
+    });
+  });
+}
+
+test('doctor reports independent connection failures without exposing authentication or URL details', async t => {
+  const github = await localFixture(t, 'github');
+  const gitlab = await localFixture(t, 'gitlab');
+  await github.cli('connect', 'github', 'owner/repo', '--publisher', 'owner', '--instance', github.origin,
+    '--notify', 'webhook', '--notify-url-env', 'FIXTURE_WEBHOOK');
+  await github.cli('connect', 'gitlab', 'owner/repo', '--publisher', 'other', '--observe', '--instance', gitlab.origin);
+  await github.cli('model', 'claude', '--model', 'fixture', '--key-env', 'FIXTURE_CLAUDE_KEY');
+  gitlab.access.commitsStatus = 403;
+  const invalidToken = 'fixture-invalid-forge-token';
+  const invalidHook = `${github.env.FIXTURE_WEBHOOK}?secret=fixture-webhook-secret`;
+  await assert.rejects(github.cliWith({ GITHUB_TOKEN: invalidToken, FIXTURE_WEBHOOK: invalidHook, FIXTURE_CLAUDE_KEY: '' })('doctor'), error => {
+    assert.equal(error.code, 1);
+    assert.match(error.stdout, /\[실패\] 토큰.*HTTP 401/);
+    assert.match(error.stdout, /\[실패\] 웹훅.*형식/);
+    assert.match(error.stdout, /\[확인\] 계정.*관찰 모드/);
+    assert.match(error.stdout, /\[실패\] 저장소 읽기.*HTTP 403/);
+    assert.match(error.stdout, /\[건너뜀\] 댓글 쓰기.*관찰 모드/);
+    assert.match(error.stdout, /\[실패\] 모델.*FIXTURE_CLAUDE_KEY/);
+    for (const value of [safeToken, invalidToken, invalidHook, 'fixture-webhook-secret']) {
+      assert.ok(!(error.stdout + error.stderr).includes(value));
+    }
+    return true;
+  });
+  assert.equal(github.notices.length, 0);
+  assert.equal(gitlab.notices.length, 0);
 });
 
 test('a paginated scan preserves its cursor when rate limited and resumes after reset', async t => {

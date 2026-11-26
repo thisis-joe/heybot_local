@@ -14,6 +14,7 @@ import { Notifications } from './notifications.js';
 import { HttpError } from './http-client.js';
 import { ModelFailure, failureMessage } from './model-failure.js';
 import { maskSecret, redact } from './redact.js';
+import { doctor } from './doctor.js';
 
 const usage = `heybot_local
   connect github|gitlab OWNER/REPO --publisher LOGIN [--observe] [--token-env NAME] [--instance URL]
@@ -21,6 +22,7 @@ const usage = `heybot_local
   model codex [--model ID]
   model claude --model ID [--key-env NAME]
   model ollama --model ID [--url URL] [--context TOKENS]
+  doctor
   watch [--interval SECONDS] [--once]
   status
   retry JOB_ID
@@ -30,6 +32,12 @@ async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
   if (!command || ['help', '--help', '-h'].includes(command)) { console.log(usage); return; }
   const dir = home();
+  if (command === 'doctor') {
+    if (args.length === 1 && ['--help', '-h'].includes(args[0]!)) { console.log('heybot_local doctor'); return; }
+    if (args.length) { console.error('사용법은 heybot_local doctor 입니다.'); process.exitCode = 1; return; }
+    process.exitCode = await doctor(dir);
+    return;
+  }
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const config = await readConfig(dir);
   if (command === 'connect') {
