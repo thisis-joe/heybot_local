@@ -23,10 +23,10 @@ export function commandEvent(platform: Platform, target: Target, comment: Commen
 }
 export function recentFloor(cursor: Cursor): number { return Math.max(cursor.baseline, cursor.through - overlap); }
 
-type Notice = { target: Target; source: string; payload: Notification };
-function commentNotice(target: Target, source: string, title: string, comment: Comment, author = comment.author): Notice {
+type Notice = { target: Target; source: string; payload: Notification; at: number };
+function commentNotice(target: Target, source: string, title: string, comment: Comment, at: number, author = comment.author): Notice {
   const preview = redact(comment.body).trim().split(/[\r\n]/, 1)[0] ?? '';
-  return { target, source, payload: { kind: 'commented', title, noteId: comment.id, author: redact(author).slice(0, 200),
+  return { target, source, at, payload: { kind: 'commented', title, noteId: comment.id, author: redact(author).slice(0, 200),
     ...(comment.surface !== 'note' ? { surface: comment.surface } : {}),
     preview: preview.slice(0, 200) + (preview.length > 200 ? '…' : '') } };
 }
@@ -41,6 +41,7 @@ async function* githubPulls(platform: Platform, floor: number): AsyncGenerator<a
 async function pollGithub(platform: Platform, store: Store, key: string, cursor: Cursor, now: number, notifications?: Notifications): Promise<void> {
   const floor = recentFloor(cursor);
   const notifySince = notifications?.enabled(platform.config) ? notifications.startedAt(platform.config, now) : Infinity;
+  const commentSince = Math.max(notifySince, notifications?.startsAfter(platform.config, 'commented') ?? Infinity);
   const events: Event[] = [], notices: Notice[] = [];
   const pulls = new Map<number, any>();
   for await (const pr of githubPulls(platform, floor)) {
@@ -51,11 +52,11 @@ async function pollGithub(platform: Platform, store: Store, key: string, cursor:
     const title = redact(String(detail.title ?? '')).slice(0, 500);
     const author = detail.user?.login;
     if (inWindow(detail.created_at, notifySince, now))
-      notices.push({ target, source: 'opened', payload: { kind: 'opened', title, author } });
+      notices.push({ target, source: 'opened', at: time(detail.created_at), payload: { kind: 'opened', title, author } });
     if (detail.state !== 'closed' || !inWindow(detail.merged_at, floor, now)) continue;
     events.push({ kind: 'review', target, headSha: detail.head?.sha, merged: true, deliveryId: `merge:${detail.merged_at}` });
     if (inWindow(detail.merged_at, notifySince, now))
-      notices.push({ target, source: `merged:${detail.merged_at}`, payload: { kind: 'merged', title, author } });
+      notices.push({ target, source: `merged:${detail.merged_at}`, at: time(detail.merged_at), payload: { kind: 'merged', title, author } });
   }
 
   for (const surface of ['issue', 'review'] as const) {
@@ -73,7 +74,7 @@ async function pollGithub(platform: Platform, store: Store, key: string, cursor:
       };
       if (platform.owned({ ...comment, url: '', parentId: comment.parentId ?? undefined, discussionId: undefined })) continue;
       const event = commandEvent(platform, target, comment);
-      const notice = inWindow(raw.created_at, notifySince, now);
+      const notice = inWindow(raw.created_at, commentSince, now);
       if (!event && !notice) continue;
       if ((surface === 'issue' || notice) && !pulls.has(number)) {
         try { pulls.set(number, await platform.api.request(`${platform.root}/pulls/${number}`)); }
@@ -84,11 +85,11 @@ async function pollGithub(platform: Platform, store: Store, key: string, cursor:
       }
       if ((surface === 'issue' || notice) && !pulls.get(number)) continue;
       if (event) events.push(event);
-      if (notice) notices.push(commentNotice(target, `comment:${commentKey(comment)}`, redact(String(pulls.get(number).title ?? '')).slice(0, 500), comment));
+      if (notice) notices.push(commentNotice(target, `comment:${commentKey(comment)}`, redact(String(pulls.get(number).title ?? '')).slice(0, 500), comment, time(raw.created_at)));
     }
   }
   store.saveScan(key, { ...cursor, through: now }, platform.config.mode === 'publish' ? events : [],
-    () => notices.forEach(item => notifications?.enqueue(item.target, item.source, item.payload)));
+    () => notices.forEach(item => notifications?.enqueue(item.target, item.source, item.payload, item.at)));
 }
 export function positiveInteger(value: unknown): value is number { return Number.isSafeInteger(value) && Number(value) > 0; }
 
@@ -141,16 +142,17 @@ async function pollGitlab(platform: Platform, store: Store, key: string, cursor:
   const events: Event[] = [];
   const notices: Notice[] = [];
   const notifySince = notifications?.enabled(platform.config) ? notifications.startedAt(platform.config, now) : Infinity;
+  const commentSince = Math.max(notifySince, notifications?.startsAfter(platform.config, 'commented') ?? Infinity);
   for (const mr of all) {
     const target = platform.target(mr.iid);
     const title = redact(String(mr.title ?? '')).slice(0, 500);
     if (inWindow(mr.created_at, notifySince, now))
-      notices.push({ target, source: 'opened', payload: { kind: 'opened', title } });
+      notices.push({ target, source: 'opened', at: time(mr.created_at), payload: { kind: 'opened', title } });
     if (mr.state === 'merged') {
       const detail = mr.merged_at === undefined && inWindow(mr.updated_at, floor, now)
         ? await platform.api.request(`${platform.root}/merge_requests/${mr.iid}`) : mr;
       if (inWindow(detail.merged_at, cursor.baseline, now)) {
-        if (inWindow(detail.merged_at, notifySince, now)) notices.push({ target, source: `merged:${detail.merged_at}`, payload: { kind: 'merged', title } });
+        if (inWindow(detail.merged_at, notifySince, now)) notices.push({ target, source: `merged:${detail.merged_at}`, at: time(detail.merged_at), payload: { kind: 'merged', title } });
         events.push({ target, kind: 'review', merged: true, headSha: detail.diff_refs?.head_sha ?? detail.sha, deliveryId: `merge:${detail.merged_at}` });
       }
     }
@@ -160,16 +162,17 @@ async function pollGitlab(platform: Platform, store: Store, key: string, cursor:
       const comment: Comment = { id: String(raw.id), author: raw.author.username, authorId: positiveInteger(raw.author.id) ? raw.author.id : undefined, body, surface: 'note', parentId: null, discussionId: raw.discussion ?? null };
       const event = commandEvent(platform, target, comment, Boolean(raw.threadedReply));
       if (event) events.push(event);
-      if (inWindow(raw.created_at, notifySince, now))
-        notices.push(commentNotice(target, `comment:${raw.id}`, title, comment, String(raw.author.name ?? raw.author.username)));
+      if (inWindow(raw.created_at, commentSince, now))
+        notices.push(commentNotice(target, `comment:${raw.id}`, title, comment, time(raw.created_at), String(raw.author.name ?? raw.author.username)));
     }
   }
   store.saveScan(key, { ...cursor, through: now, sweep: nextPage }, platform.config.mode === 'publish' ? events : [],
-    () => notices.forEach(item => notifications?.enqueue(item.target, item.source, item.payload)));
+    () => notices.forEach(item => notifications?.enqueue(item.target, item.source, item.payload, item.at)));
 }
 
 async function pollGithubLifecycle(platform: Platform, store: Store, notifications: Notifications, key: string, cursor: Cursor, now: number): Promise<void> {
-  const floor = recentFloor(cursor);
+  const floor = Math.max(recentFloor(cursor),
+    Math.min(notifications.startsAfter(platform.config, 'reopened'), notifications.startsAfter(platform.config, 'closed')));
   const notices: Notice[] = [];
   for await (const pr of githubPulls(platform, floor)) {
     const timeline = await platform.api.pages(`${platform.root}/issues/${pr.number}/timeline`);
@@ -179,17 +182,20 @@ async function pollGithubLifecycle(platform: Platform, store: Store, notificatio
       if (!positiveInteger(entry.id) || !inWindow(entry.created_at, floor, now)) continue;
       const kind = entry.event === 'reopened' ? 'reopened'
         : entry.event === 'closed' && !mergedTimes.has(time(entry.created_at)) ? 'closed' : null;
-      if (kind) notices.push({ target, source: `state:${entry.id}`, payload: { kind, title, author: pr.user?.login } });
+      if (kind) notices.push({ target, source: `state:${entry.id}`, at: time(entry.created_at), payload: { kind, title, author: pr.user?.login } });
     }
   }
   store.saveScan(key, { ...cursor, through: now }, [], () => {
-    for (const item of notices) notifications.enqueue(item.target, item.source, item.payload);
+    for (const item of notices) notifications.enqueue(item.target, item.source, item.payload, item.at);
   });
 }
 
 export async function pollLifecycle(platform: Platform, store: Store, notifications: Notifications, now = Date.now()): Promise<void> {
+  if (notifications.startsAfter(platform.config, 'reopened') === Infinity &&
+      notifications.startsAfter(platform.config, 'closed') === Infinity) return;
   const key = notifications.scope(platform.config) + ':lifecycle';
-  const start = store.cursor(key) ?? { baseline: notifications.startedAt(platform.config, now), through: now };
+  const baseline = notifications.startedAt(platform.config, now);
+  const start = store.cursor(key) ?? { baseline, through: baseline };
   if (platform.config.platform === 'github') return pollGithubLifecycle(platform, store, notifications, key, start, now);
   const { all, nextPage } = await gitlabRequests(platform, start, now, true);
   const notices: Notice[] = [];
@@ -200,28 +206,29 @@ export async function pollLifecycle(platform: Platform, store: Store, notificati
       for await (const entry of platform.api.items(`${platform.root}/merge_requests/${mr.iid}/resource_state_events`)) {
         if (!positiveInteger(entry.id) || !inWindow(entry.created_at, start.baseline, now)) continue;
         const kind = ['opened', 'reopened'].includes(entry.state) ? 'reopened' : entry.state === 'closed' ? 'closed' : null;
-        if (kind) notices.push({ target, source: `state:${entry.id}`, payload: { kind, title } });
+        if (kind) notices.push({ target, source: `state:${entry.id}`, at: time(entry.created_at), payload: { kind, title } });
       }
     } catch (error) {
       if (!(error instanceof HttpError && [404, 405, 501].includes(error.status))) throw error;
       const prior = store.mrState(target);
-      const kind = prior === 'closed' && mr.state === 'opened' ? 'reopened'
-        : prior === 'opened' && mr.state === 'closed' ? 'closed' : null;
-      if (kind && inWindow(mr.updated_at, start.baseline, now))
-        notices.push({ target, source: `observed:${kind}:${mr.updated_at}`, payload: { kind, title } });
+      if (!prior) continue;
+      const kind = prior.state === 'closed' && mr.state === 'opened' ? 'reopened'
+        : prior.state === 'opened' && mr.state === 'closed' ? 'closed' : null;
+      // A state observed before re-enabling this event cannot date a fallback transition.
+      if (kind && prior.observedAt >= notifications.startsAfter(platform.config, kind) && inWindow(mr.updated_at, start.baseline, now))
+        notices.push({ target, source: `observed:${kind}:${mr.updated_at}`, at: time(mr.updated_at), payload: { kind, title } });
     }
   }
   store.saveScan(key, { ...start, through: now, sweep: nextPage }, [], () => {
-    for (const mr of all) store.rememberMrState(platform.target(mr.iid), mr.state);
-    for (const item of notices) notifications.enqueue(item.target, item.source, item.payload);
+    for (const mr of all) store.rememberMrState(platform.target(mr.iid), mr.state, now);
+    for (const item of notices) notifications.enqueue(item.target, item.source, item.payload, item.at);
   });
 }
 
 const isSha = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{40,64}$/.test(value);
-async function pollGithubPush(platform: Platform, store: Store, notifications: Notifications, key: string, cursor: Cursor, now: number): Promise<void> {
-  const floor = Math.max(cursor.baseline, cursor.through - 15 * 60000);
+async function pollGithubPush(platform: Platform, store: Store, notifications: Notifications, key: string, cursor: Cursor, floor: number, now: number): Promise<void> {
   const target = platform.target(0);
-  const notices: { source: string; payload: Notification | null }[] = [];
+  const notices: { source: string; payload: Notification | null; at: number }[] = [];
   for await (const activity of platform.api.cursorItems(`${platform.root}/activity?direction=desc`)) {
     const timestamp = activity.timestamp ?? activity.pushed_at;
     if (time(timestamp) < floor) break;
@@ -234,19 +241,25 @@ async function pollGithubPush(platform: Platform, store: Store, notifications: N
     const payload = branch && branch.length <= 250 && isSha(before) && isSha(after)
       ? { kind: 'push' as const, branch, before, after, author: redact(String(activity.actor?.login ?? activity.pusher?.login ?? '')).slice(0, 200) }
       : null;
-    notices.push({ source, payload });
+    notices.push({ source, payload, at: time(timestamp) });
   }
-  store.saveScan(key, { ...cursor, through: now }, [], () => notices.forEach(item => notifications.enqueue(target, item.source, item.payload)));
+  store.saveScan(key, { ...cursor, through: now }, [], () => notices.forEach(item => notifications.enqueue(target, item.source, item.payload, item.at)));
 }
 
 export async function pollPush(platform: Platform, store: Store, notifications: Notifications, now = Date.now()): Promise<void> {
+  const selectedSince = Math.min(notifications.startsAfter(platform.config, 'push'), notifications.startsAfter(platform.config, 'branch-created'));
+  if (selectedSince === Infinity) return;
   const key = notifications.scope(platform.config) + ':push';
-  const start = store.cursor(key) ?? { baseline: notifications.startedAt(platform.config, now), through: now };
-  if (platform.config.platform === 'github') return pollGithubPush(platform, store, notifications, key, start, now);
-  const floor = recentFloor(start);
+  const baseline = notifications.startedAt(platform.config, now);
+  const start = store.cursor(key) ?? { baseline, through: baseline };
+  if (platform.config.platform === 'github') {
+    const floor = Math.max(selectedSince, start.baseline, start.through - 15 * 60000);
+    return pollGithubPush(platform, store, notifications, key, start, floor, now);
+  }
+  const floor = Math.max(selectedSince, recentFloor(start));
   const day = new Date(floor - 86400000).toISOString().slice(0, 10);
   const target = platform.target(0);
-  const notices: { source: string; payload: Notification | null }[] = [];
+  const notices: { source: string; payload: Notification | null; at: number }[] = [];
   for await (const event of platform.api.items(`${platform.root}/events?action=pushed&sort=desc&after=${day}`)) {
     if (time(event.created_at) < floor) break;
     if (!positiveInteger(event.id) || !inWindow(event.created_at, floor, now)) continue;
@@ -258,11 +271,11 @@ export async function pollPush(platform: Platform, store: Store, notifications: 
     const before = push?.action === 'created' && push?.commit_from == null ? '0'.repeat(40) : push?.commit_from;
     if (typeof push?.ref !== 'string' || !push.ref || push.ref.length > 250 || !isSha(after) || !isSha(before) ||
       !Number.isSafeInteger(push.commit_count) || push.commit_count < 0) {
-      notices.push({ source, payload: null });
+      notices.push({ source, payload: null, at: time(event.created_at) });
       continue;
     }
-    notices.push({ source, payload: { kind: 'push', branch: push.ref, count: push.commit_count,
+    notices.push({ source, at: time(event.created_at), payload: { kind: 'push', branch: push.ref, count: push.commit_count,
       before, after, author: redact(String(event.author?.name ?? event.author_username ?? '')).slice(0, 200) } });
   }
-  store.saveScan(key, { ...start, through: now }, [], () => notices.forEach(item => notifications.enqueue(target, item.source, item.payload)));
+  store.saveScan(key, { ...start, through: now }, [], () => notices.forEach(item => notifications.enqueue(target, item.source, item.payload, item.at)));
 }

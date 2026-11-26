@@ -27,6 +27,8 @@ export function trustedUrl(value: string, localOnly = false): string {
 }
 export const NotificationProvider = z.enum(['mattermost', 'slack', 'discord', 'webhook']);
 export type NotificationProvider = z.infer<typeof NotificationProvider>;
+export const NotificationEvent = z.enum(['opened', 'reopened', 'merged', 'closed', 'commented', 'questions', 'push', 'branch-created']);
+export type NotificationEvent = z.infer<typeof NotificationEvent>;
 export const notificationEnv: Record<NotificationProvider, string> = {
   mattermost: 'MATTERMOST_WEBHOOK_URL', slack: 'SLACK_WEBHOOK_URL',
   discord: 'DISCORD_WEBHOOK_URL', webhook: 'HEYBOT_WEBHOOK_URL',
@@ -42,6 +44,8 @@ export const RepositorySchema = z.strictObject({
     provider: NotificationProvider,
     urlEnv: envName,
     channel: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/).optional(),
+    events: z.array(NotificationEvent).min(1).optional(),
+    commentPreview: z.boolean().optional(),
   }).optional(),
 }).superRefine((repo, ctx) => {
   if (repo.platform === 'github' && repo.repository.split('/').length !== 2)

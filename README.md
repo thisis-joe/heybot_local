@@ -29,7 +29,7 @@ GitLab은 `GITLAB_TOKEN`을 설정하고 `heybot_local connect gitlab GROUP/PROJ
 | GitLab | `api` 범위와 프로젝트의 MR·노트·디스커션·Git 읽기 권한. 상태를 게시할 계정은 Developer 이상 |
 | 댓글 사용자 | GitHub Write 또는 그 이상, GitLab Developer 또는 그 이상 |
 
-`heybot_local status`는 감시 여부, 커서, 작업과 알림 상태, 실패 사유를 표시합니다. 기본 폴링 간격은 60초이며 `watch --interval 30`으로 변경할 수 있습니다. `watch --once`는 한 번 조회하고 실행 가능한 대기 작업을 처리합니다. `Ctrl+C`로 종료할 수 있습니다. 저장소나 모델 설정을 변경했다면 감시를 재시작합니다.
+`heybot_local status`는 감시 여부, 커서, 작업과 알림 상태, 실패 사유를 표시합니다. 기본 폴링 간격은 60초이며 `watch --interval 30`으로 변경할 수 있습니다. `watch --once`는 한 번 조회하고 실행 가능한 대기 작업을 처리합니다. `Ctrl+C`로 감시를 종료한 뒤 `connect` 또는 `model`로 설정을 바꾸고 `watch`를 다시 시작합니다.
 
 ## 모델
 
@@ -76,7 +76,30 @@ heybot_local connect gitlab GROUP/PROJECT --publisher YOUR_GITLAB_LOGIN --notify
 | `discord` | `DISCORD_WEBHOOK_URL` | Discord의 웹훅 생성 화면 |
 | `webhook` | `HEYBOT_WEBHOOK_URL` | 별도 수신기에서 처리 |
 
-`--notify-url-env NAME`으로 주소를 읽을 변수 이름을 지정할 수 있습니다. 알림을 끄려면 `--notify` 없이 저장소를 다시 연결합니다. 알림은 두 포지 모두에서 PR/MR 열기·재열기·머지·닫기, 일반·리뷰 또는 디스커션의 사람 댓글, 질문 준비, 브랜치 Push 및 생성을 다룹니다. 알림으로 변경 요청 제목, 댓글 첫 줄, 커밋 제목과 링크가 팀 채널로 전송될 수 있습니다. 일반 웹훅은 `version`, `id`, `event`, `repository`, Markdown `text`를 JSON POST로 보냅니다. 변경 요청 번호는 GitHub에서 `pullRequest`, GitLab에서 `mergeRequest` 필드를 사용합니다. [Slack Incoming Webhooks](https://api.slack.com/messaging/webhooks) · [Discord Webhook API](https://docs.discord.com/developers/resources/webhook)
+`--notify-url-env NAME`으로 주소를 읽을 변수 이름을 지정할 수 있습니다. 알림을 모두 끄려면 `--notify` 없이 저장소를 다시 연결합니다.
+
+두 포지에서 `--notify-events`에 보낼 이벤트를 쉼표로 구분해 지정할 수 있습니다. 아래 예시는 머지, 댓글, 질문 준비 알림을 보내고 댓글 미리보기를 끕니다.
+
+```sh
+heybot_local connect github OWNER/REPO --publisher YOUR_GITHUB_LOGIN --notify slack \
+  --notify-events merged,commented,questions --no-notify-comment-preview
+heybot_local connect gitlab GROUP/PROJECT --publisher YOUR_GITLAB_LOGIN --notify discord \
+  --notify-events merged,commented,questions --no-notify-comment-preview
+```
+
+| 이벤트 | 알림 내용 |
+| --- | --- |
+| `opened`, `reopened`, `merged`, `closed` | PR/MR 열기, 재열기, 머지, 닫기 |
+| `commented` | 일반·리뷰 댓글 또는 디스커션의 사람 댓글 |
+| `questions` | 질문 준비 |
+| `push` | 기존 브랜치에 커밋 Push |
+| `branch-created` | 새 브랜치 생성 |
+
+두 옵션을 생략하면 기존 저장소 설정과 마찬가지로 모든 이벤트를 보내고 댓글 첫 줄을 표시합니다. `--no-notify-comment-preview`를 지정하면 댓글 알림에 작성자, PR/MR 제목과 댓글 링크가 표시됩니다. 질문 게시와 댓글 명령은 알림 설정과 독립적으로 동작합니다.
+
+같은 알림 대상으로 다시 연결해도 전송 이력과 조회 커서는 이어집니다. 이벤트 선택에서 제외된 대기 알림은 `skipped`로 표시합니다. 이벤트를 다시 선택하면 기록된 이벤트 시각이 재활성화 시각보다 늦을 때부터 전송합니다. 미리보기를 끄면 이미 대기 중인 댓글 알림에서도 미리보기를 제거합니다. 미리보기를 다시 켜면 이후 대기열에 들어오는 댓글부터 미리보기를 표시합니다.
+
+일반 웹훅은 `version`, `id`, `event`, `repository`, Markdown `text`를 JSON POST로 보냅니다. 기존 브랜치 Push와 새 브랜치 생성의 `event` 값은 모두 `push`입니다. 변경 요청 번호는 GitHub에서 `pullRequest`, GitLab에서 `mergeRequest` 필드를 사용합니다. [Slack Incoming Webhooks](https://api.slack.com/messaging/webhooks) · [Discord Webhook API](https://docs.discord.com/developers/resources/webhook)
 
 ## 운영과 복구
 
@@ -98,6 +121,7 @@ heybot_local connect gitlab GROUP/PROJECT --publisher YOUR_GITLAB_LOGIN --notify
 | GitHub | 사용자 승인 테스트 저장소에서 설치 패키지로 검증. PR #1의 실제 머지, 요약 1개와 인라인 질문 2개, 같은 계정의 복수 답변과 근거 채점, 문항별 인라인 해설. PR #2에서 `requireAnswers`의 pending→success와 닫힌 PR의 도움말 확인. [머지 PR](https://github.com/thisis-joe/heybot_local/pull/1) · [채점](https://github.com/thisis-joe/heybot_local/pull/1#issuecomment-7186399720) · [스레드 해설](https://github.com/thisis-joe/heybot_local/pull/1#discussion_r4705494257) · [답변 상태 PR](https://github.com/thisis-joe/heybot_local/pull/2) |
 | GitLab | 격리된 MR·디스커션·커밋 상태와 알림 테스트. 공개 GitLab 프로젝트에서 목록 및 Push 이벤트 응답 확인. 사용자 인증이 필요한 실제 GitLab MR 게시·상태는 미검증 |
 | 협업 알림 | 두 포지에서 변경 요청·댓글·질문·Push·새 브랜치와 네 웹훅 전송 형식을 격리 검증했습니다. 실제 GitHub 저장소의 재열기·닫기·댓글·브랜치 생성·Push 5건도 로컬 수신기에서 확인했습니다. 재조회 시 추가 전송은 0건이었습니다. [테스트 댓글](https://github.com/thisis-joe/heybot_local/pull/2#issuecomment-7186672328) · [테스트 브랜치](https://github.com/thisis-joe/heybot_local/tree/verify/heybot-local-notifications) |
+| 알림 제어 | GitHub·GitLab 격리 CLI에서 이벤트 선택, 재활성화와 중복 방지, 댓글 미리보기의 대기열 제거, 질문 게시와 댓글 명령을 확인했습니다. |
 
 실연동은 공개 `heybot_local` 저장소의 테스트 브랜치와 합성 코드에 한정했습니다.
 
@@ -108,7 +132,7 @@ heybot_local connect gitlab GROUP/PROJECT --publisher YOUR_GITLAB_LOGIN --notify
 | 운영체제와 포지 | macOS에서 Node 22·26과 GitHub.com을 실검증했습니다. Linux·Windows의 설치·종료 동작, 비공개 GitLab, GitHub Enterprise 및 사내 CA 환경의 실연동 결과가 필요합니다. |
 | 최초 설정 | `connect`가 토큰 사용자와 저장소 읽기를 확인합니다. 댓글·커밋 상태 쓰기 권한과 웹훅 수신 여부는 실제 작업에서 확인됩니다. |
 | 모델 인증 | Codex ChatGPT 로그인, Claude API 키, 로컬 Ollama를 설정할 수 있습니다. Claude 구독과 Ollama·Claude 유료 API의 실제 실행 범위는 검증 표를 참고합니다. |
-| 알림 관리 | 저장소마다 채널 한 곳을 지정합니다. 이벤트별 선택, 댓글 미리보기 끄기, 여러 채널로 분배는 범용 배포 시 추가할 선택지입니다. |
+| 알림 관리 | 저장소마다 알림 대상 한 곳, 이벤트 종류와 댓글 미리보기 표시 여부를 설정할 수 있습니다. 실제 협업 채널에서 설정 전환과 수신을 확인할 항목이 남아 있습니다. |
 | 계속 실행과 인계 | 지정 PC가 꺼져 있는 동안엔 게시가 멈추고 재시작 시 커서에서 복구합니다. 다른 PC에 맡길 때는 프로필과 게시 계정 이관이 필요합니다. |
 
 

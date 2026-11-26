@@ -3,14 +3,14 @@ import { parseArgs } from 'node:util';
 import { mkdir } from 'node:fs/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { z } from 'zod';
-import { ModelConfigSchema, RepositorySchema, NotificationProvider, notificationEnv, credential, home, readConfig, repositoryKey, sameLogin, trustedUrl, writeConfig } from './config.js';
+import { ModelConfigSchema, RepositorySchema, NotificationEvent, NotificationProvider, notificationEnv, credential, home, readConfig, repositoryKey, sameLogin, trustedUrl, writeConfig } from './config.js';
 import { Store, watcherLock } from './store.js';
 import { Workspaces } from './workspace.js';
 import { Platform } from './platform.js';
 import { checkCodexLogin, createModel } from './models.js';
 import { Controller } from './controller.js';
 import { poll, pollLifecycle, pollPush } from './poll.js';
-import { Notifications } from './notifications.js';
+import { applyNotificationControls, Notifications } from './notifications.js';
 import { HttpError } from './http-client.js';
 import { ModelFailure, failureMessage } from './model-failure.js';
 import { maskSecret, redact } from './redact.js';
@@ -18,6 +18,8 @@ import { maskSecret, redact } from './redact.js';
 const usage = `heybot_local
   connect github|gitlab OWNER/REPO --publisher LOGIN [--observe] [--token-env NAME] [--instance URL]
       [--notify mattermost|slack|discord|webhook] [--notify-url-env NAME] [--notify-channel NAME]
+      [--notify-events EVENT,...] [--no-notify-comment-preview]
+      Events: ${NotificationEvent.options.join(', ')}
   model codex [--model ID]
   model claude --model ID [--key-env NAME]
   model ollama --model ID [--url URL] [--context TOKENS]
@@ -31,27 +33,46 @@ async function main(): Promise<void> {
   if (!command || ['help', '--help', '-h'].includes(command)) { console.log(usage); return; }
   const dir = home();
   await mkdir(dir, { recursive: true, mode: 0o700 });
+  // Take the lock before reading configuration so a watcher and a settings change cannot cross.
+  const unlock = ['connect', 'model', 'watch'].includes(command) ? watcherLock(dir) : undefined;
+  try { await run(dir, command, args); }
+  finally { unlock?.(); }
+}
+
+async function run(dir: string, command: string, args: string[]): Promise<void> {
   const config = await readConfig(dir);
   if (command === 'connect') {
     const { values, positionals: [platform, repository, ...rest] } = parseArgs({ args, allowPositionals: true, options: {
       publisher: { type: 'string' }, observe: { type: 'boolean' }, 'token-env': { type: 'string' }, instance: { type: 'string' },
       notify: { type: 'string' }, 'notify-url-env': { type: 'string' }, 'notify-channel': { type: 'string' },
+      'notify-events': { type: 'string' }, 'no-notify-comment-preview': { type: 'boolean' },
     } });
     if (rest.length || !values.publisher) throw new Error('connect에 플랫폼, 저장소 경로, --publisher 계정을 지정하세요.');
     const destination = values.notify ? NotificationProvider.parse(values.notify) : undefined;
-    if (!destination && (values['notify-url-env'] || values['notify-channel']))
+    if (!destination && (values['notify-url-env'] !== undefined || values['notify-channel'] !== undefined ||
+      values['notify-events'] !== undefined || values['no-notify-comment-preview']))
       throw new Error('--notify에 알림 서비스를 지정하세요.');
     const repo = RepositorySchema.parse({ platform, repository, botLogin: values.publisher, mode: values.observe ? 'observe' : 'publish',
       tokenEnv: values['token-env'] ?? (platform === 'github' ? 'GITHUB_TOKEN' : 'GITLAB_TOKEN'),
       instance: values.instance ?? (platform === 'github' ? 'https://api.github.com' : 'https://gitlab.com'),
       notifications: destination ? {
         provider: destination, urlEnv: values['notify-url-env'] ?? notificationEnv[destination], channel: values['notify-channel'],
+        events: values['notify-events']?.split(',').map(event => event.trim()),
+        commentPreview: values['no-notify-comment-preview'] ? false : undefined,
       } : undefined });
     const client = new Platform(repo, async () => credential(repo.tokenEnv));
     await verifyAccount(client);
     await client.api.request(client.root);
-    config.repositories = [...config.repositories.filter(r => repositoryKey(r) !== repositoryKey(repo)), repo];
-    await writeConfig(dir, config);
+    const key = repositoryKey(repo);
+    const previous = config.repositories.find(r => repositoryKey(r) === key);
+    config.repositories = [...config.repositories.filter(r => repositoryKey(r) !== key), repo];
+    const store = previous?.notifications || repo.notifications ? new Store(dir) : undefined;
+    try {
+      // A prior connect may have stopped after saving config and before applying its controls.
+      if (store && previous?.notifications) applyNotificationControls(store, previous);
+      await writeConfig(dir, config);
+      if (store && repo.notifications) applyNotificationControls(store, repo);
+    } finally { store?.close(); }
     console.log(`${platform} ${repository} 연결됨 (${repo.mode})`);
     if (repo.mode === 'publish') console.log(`게시 담당 계정은 ${repo.botLogin}입니다. 팀에서 지정한 PC 한 대에서 게시 모드를 실행하세요.`);
     return;
@@ -87,7 +108,6 @@ async function main(): Promise<void> {
       if (!Number.isInteger(seconds) || seconds < 5 || seconds > 3600) throw new Error('--interval은 5~3600초여야 합니다.');
       if (!config.repositories.length) throw new Error('먼저 connect로 저장소를 연결하세요.');
       if (!config.model && config.repositories.some(r => r.mode === 'publish')) throw new Error('먼저 model로 모델을 설정하세요.');
-      const unlock = watcherLock(dir);
       const abort = new AbortController();
       const stop = () => abort.abort();
       process.on('SIGINT', stop);
@@ -148,7 +168,6 @@ async function main(): Promise<void> {
       } finally {
         process.off('SIGINT', stop);
         process.off('SIGTERM', stop);
-        unlock();
       }
     } else throw new Error('명령과 옵션을 확인하세요. heybot_local --help');
   } finally { store.close(); }
